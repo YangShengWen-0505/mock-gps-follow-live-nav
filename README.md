@@ -1,8 +1,34 @@
 # Mock GPS Follow Live Nav
 
-Mock GPS Follow Live Nav 是一個供自有應用程式與私有測試環境使用的 GPS 模擬與即時導航跟隨系統。PC 端以 Flask web、獨立 mission worker 與 SQLite 管理 Google Maps 路線與連續 GPS 座標，經 Tailscale 送到 Android 手機，由 MacroDroid 轉交 GPS JoyStick 更新模擬定位。請勿用於偽造出勤、規避第三方服務控制或違反適用法律與服務條款的用途。
+GPS Route Simulation and Live Navigation System
 
-本文件以 Windows + PowerShell 為基準撰寫，指令路徑皆為 `.venv\Scripts\`。
+Mock GPS Follow Live Nav is a local testing system for simulating GPS routes and monitoring live navigation progress. It combines a Python and Flask web application, a mission worker, SQLite, Google Maps Directions API, Tailscale, and Android integration through MacroDroid and GPS JoyStick.
+
+本專案供自有應用程式與私有測試環境使用，請勿用於偽造出勤、規避第三方服務控制或違反適用法律與服務條款的用途。本文件以 Windows + PowerShell 為基準撰寫，指令路徑皆為 `.venv\Scripts\`。
+
+## Portfolio overview
+
+This project was developed to explore asynchronous mission execution, route planning, real-time monitoring, Android integration, and persistent mission history.
+
+## Key features
+
+- Plans walking, transit, and motorcycle routes with Google Maps Directions API.
+- Runs the Flask web application and mission worker through one local entry point.
+- Sends GPS coordinates from the PC to an Android test device through Tailscale and MacroDroid.
+- Stores mission state, logs, movement records, and historical sessions in SQLite.
+- Provides automated code checks through GitHub Actions.
+
+## Technology stack
+
+Python 3.10 or later, Flask, SQLite, Google Maps Directions API, Tailscale, MacroDroid, Android, Pytest, Ruff, and GitHub Actions.
+
+## Project status
+
+This project is intended for controlled local testing environments. The full setup requires a Google Maps API key, a Windows PC, an Android test device, and Tailscale connectivity.
+
+## Documentation
+
+The sections below provide detailed setup and technical documentation, including system flow, installation, Android integration, API usage, logging, security, testing, and troubleshooting.
 
 ## 功能
 
