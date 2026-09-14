@@ -2,15 +2,29 @@
 
 GPS Route Simulation and Live Navigation System
 
-Mock GPS Follow Live Nav is a local testing system for simulating GPS routes and monitoring live navigation progress. It combines a Python and Flask web application, a mission worker, SQLite, Google Maps Directions API, Tailscale, and Android integration through MacroDroid and GPS JoyStick.
+Mock GPS Follow Live Nav is a local testing system that simulates GPS routes and monitors live navigation progress across a Windows PC, an Android device, and a private Tailscale network.
+
+The project combines a Python and Flask web application, a background mission worker, SQLite persistence, the Google Maps Directions API, MacroDroid, and GPS JoyStick. It is designed to help developers test route planning, asynchronous task execution, real-time monitoring, Android integration, and historical mission analysis in a controlled environment.
+
+## Project overview
+
+The system accepts a route task, plans the complete journey with the Google Maps Directions API, sends simulated coordinates to an Android test device, and records the execution for monitoring and later review.
+
+The main workflow is:
+
+1. Submit a route task through the web dashboard, API, or MacroDroid.
+2. Plan the route asynchronously with the mission worker.
+3. Forward simulated coordinates to the Android device through Tailscale and MacroDroid.
+4. Monitor task status, ETA, route progress, logs, and phone health.
+5. Review the completed session through historical data and logs.
+
+## Portfolio context
+
+This project was developed as a practical exploration of asynchronous processing, network communication, route planning, persistent storage, mobile integration, and automated testing. Its focus is not only simulating movement, but also designing a complete workflow that can be observed, verified, interrupted, and reviewed.
 
 This project is intended for personal applications and private testing environments. Do not use it to falsify attendance, bypass third-party service controls, or violate applicable laws or terms of service.
 
 This documentation is written for Windows and PowerShell. The command paths use .venv/Scripts/.
-
-## Portfolio overview
-
-This project was developed to explore asynchronous mission execution, route planning, real-time monitoring, Android integration, and persistent mission history.
 
 ## Key features
 
