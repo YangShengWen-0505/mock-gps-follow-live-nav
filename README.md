@@ -4,7 +4,9 @@ GPS Route Simulation and Live Navigation System
 
 Mock GPS Follow Live Nav is a local testing system for simulating GPS routes and monitoring live navigation progress. It combines a Python and Flask web application, a mission worker, SQLite, Google Maps Directions API, Tailscale, and Android integration through MacroDroid and GPS JoyStick.
 
-本專案供自有應用程式與私有測試環境使用，請勿用於偽造出勤、規避第三方服務控制或違反適用法律與服務條款的用途。本文件以 Windows + PowerShell 為基準撰寫，指令路徑皆為 `.venv\Scripts\`。
+This project is intended for personal applications and private testing environments. Do not use it to falsify attendance, bypass third-party service controls, or violate applicable laws or terms of service.
+
+This documentation is written for Windows and PowerShell. The command paths use .venv/Scripts/.
 
 ## Portfolio overview
 
@@ -30,91 +32,100 @@ This project is intended for controlled local testing environments. The full set
 
 The sections below provide detailed setup and technical documentation, including system flow, installation, Android integration, API usage, logging, security, testing, and troubleshooting.
 
-## 功能
+## Features
 
-- 任務控制：使用 `/start_task` 開始任務，使用 `/stop_task` 停止伺服器端任務
-- GPS 推送：將 `lat` / `lng` 傳送到手機端 MacroDroid `/gps`；手機 HTTP 傳送與 movement logging 完全解耦
-- 路線規劃：使用 Google Maps Directions API 取得步行、大眾運輸與機車路線
-- 導航歷史：保留每次 Google Directions 規劃的交通型態、車種、路線、站點、距離與時間資訊
-- 交通模式：支援 `walking`、`transit`、`motorcycle`
-- 大眾運輸：`transit_type` 可指定 `AUTO`、`MRT` 或 `BUS`
-- 位置維持：任務完成後保持最後位置，直到停止任務
-- 任務歷史：每次任務建立獨立 log session 與 `movement.csv`
-- 歷史分頁：選定 session 後開啟獨立頁面，地圖、狀態、路線、Navigation、CSV 與所有 log 都固定使用該 session
-- Web 監控：地圖、任務狀態、最後座標、路線、Log 與任務歷史
-- Web/Worker 分離：Web 只接受與查詢任務，單一 worker 執行導航
-- SQLite：持久化任務、ETA、路線 revision、錯誤及手機健康狀態
-- ETA 配速：任務開始前規劃全程，MRT 停站後動態補速但不超過 Google nominal speed 的 1.35 倍
+- Task control: use /start_task to start a task and /stop_task to stop the server-side task.
+- GPS forwarding: send latitude and longitude to the Android MacroDroid /gps endpoint. Mobile HTTP delivery is decoupled from movement logging.
+- Route planning: use Google Maps Directions API to obtain walking, transit, and motorcycle routes.
+- Navigation history: preserve the travel mode, vehicle type, route, stops, distance, and duration returned by each Google Directions request.
+- Travel modes: support walking, transit, and motorcycle.
+- Public transit: use transit_type to select AUTO, MRT, or BUS.
+- Position persistence: keep the last simulated position after a task finishes until the task is stopped.
+- Task history: create an independent log session and movement.csv file for every task.
+- History pages: open a selected session in a separate page. The map, status, route, navigation details, CSV data, and logs all remain bound to that session.
+- Web monitoring: view the map, task status, last coordinate, route, logs, and task history.
+- Web and worker separation: the web layer accepts and queries tasks while one worker executes navigation.
+- SQLite persistence: store tasks, ETA values, route revisions, errors, and phone health status.
+- ETA pacing: plan the complete route before starting. After an MRT stop, dynamically adjust pacing without exceeding 1.35 times Google's nominal speed.
 
-## 系統流程
+## System flow
 
-```mermaid
+~~~mermaid
 flowchart LR
-    A["MacroDroid or API Client"] --> B["Flask Web API"]
-    B --> C["SQLite planning mission (HTTP 202)"]
-    C --> D["Single mission worker"]
-    D --> E["Google full-mission planning"]
-    E --> F["Tailscale HTTP"]
-    F --> G["Android MacroDroid /gps"]
-    G --> H["GPS JoyStick TELEPORT intent"]
-    E --> I["Mission Logs and movement.csv"]
-    I --> J["Web Dashboard"]
-```
+    A[MacroDroid or API Client] --> B[Flask Web API]
+    B --> C[SQLite: plan mission and return HTTP 202]
+    C --> D[Single Mission Worker]
+    D --> E[Google full-mission planning]
+    D --> F[Tailscale HTTP]
+    F --> G[Android MacroDroid /gps]
+    G --> H[GPS JoyStick TELEPORT intent]
+    D --> I[Mission logs and movement.csv]
+    B --> J[Web Dashboard]
+~~~
 
-## 前置需求
+## Prerequisites
 
-| 項目 | 說明 |
-|---|---|
-| Windows PC | 執行 Dashboard 與 mission worker |
-| Python 3.10 以上 | `.vscode/tasks.json` 以 `py -3.12` 建立 venv；CI 以 3.10 驗證 |
-| Google Cloud 帳號 | 需啟用帳單，並開啟 Directions API |
-| Android 手機 | 執行 MacroDroid 與 GPS JoyStick |
-| [MacroDroid](https://play.google.com/store/apps/details?id=com.arlosoft.macrodroid) | 需可使用 HTTP Server 與 Send Intent（部分功能需 Pro） |
-| [GPS JoyStick](https://play.google.com/store/apps/details?id=com.theappninjas.fakegpsjoystick) | 套件名 `com.theappninjas.fakegpsjoystick`，實際更新手機定位的軟體 |
-| [Tailscale](https://tailscale.com/) | PC 與手機需登入同一個 tailnet |
+| Item | Purpose |
+| --- | --- |
+| Windows PC | Runs the dashboard and mission worker |
+| Python 3.10 or later | Creates the virtual environment; CI validates the project with Python 3.10 |
+| Google Cloud account | Provides billing and the Directions API |
+| Android phone | Runs MacroDroid and GPS JoyStick |
+| MacroDroid | Provides the HTTP server and Send Intent actions; some features require Pro |
+| GPS JoyStick | Updates the simulated phone location; package name: com.theappninjas.fakegpsjoystick |
+| Tailscale | Connects the PC and phone through the same tailnet |
 
-完整流程共八個步驟，請依序完成：取得 API Key → 安裝 → 設定 `.env` → Tailscale → GPS JoyStick → MacroDroid → 啟動 → 首次驗證。
+The complete setup has eight stages:
 
-## 步驟一：取得 Google Maps API Key
+1. Obtain a Google Maps API key.
+2. Install the project dependencies.
+3. Configure .env.
+4. Configure Tailscale.
+5. Configure GPS JoyStick.
+6. Configure MacroDroid.
+7. Start the application.
+8. Complete the first verification.
 
-1. 進入 [Google Cloud Console](https://console.cloud.google.com/) 建立專案。
-2. 於專案啟用帳單（Directions API 需要帳單帳戶）。
-3. 進入「APIs & Services」→「Library」，啟用 **Directions API**。本專案只呼叫這一個 API，不需要 Geocoding、Places 或 Maps JavaScript API。
-4. 進入「Credentials」→「Create credentials」→「API key」，複製產生的金鑰。
-5. 點金鑰進入編輯頁，於「API restrictions」選「Restrict key」並只勾選 Directions API。金鑰由 PC 後端呼叫，若 PC 為固定對外 IP，可再加上 IP 限制。
+## Step 1: Obtain a Google Maps API key
 
-金鑰填入 `.env` 的 `GOOGLE_MAPS_API_KEY`（步驟三）。
+1. Open Google Cloud Console and create a project.
+2. Enable billing for the project. Directions API requires a billing account.
+3. Open APIs and Services, then Library, and enable Directions API. This project only calls this API; Geocoding, Places, and Maps JavaScript API are not required.
+4. Open Credentials, select Create credentials, choose API key, and copy the generated key.
+5. Open the key edit page. Under API restrictions, select Restrict key and allow only Directions API. Because the key is called by the PC backend, you may also add an IP restriction if the PC has a fixed public IP address.
 
-## 步驟二：安裝
+Put the key in GOOGLE_MAPS_API_KEY in .env during Step 3.
 
-在專案資料夾開啟 PowerShell，執行一次：
+## Step 2: Install
 
-```powershell
+Open PowerShell in the project directory and run:
+
+~~~powershell
 py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements-lock.txt
-```
+.venv/Scripts/python -m pip install -r requirements-lock.txt
+~~~
 
-`requirements-lock.txt` 是完整鎖定版本的環境快照，日常安裝一律使用它。`requirements.txt` 只列直接相依，供更新鎖定檔時使用。
+requirements-lock.txt is the complete locked environment snapshot and should be used for normal installation. requirements.txt lists only direct dependencies and is used when updating the lock file.
 
-要跑測試與 lint 時再裝開發相依：
+Install development dependencies when you need to run tests or lint checks:
 
-```powershell
-.venv\Scripts\python -m pip install -r requirements-dev.txt
-```
+~~~powershell
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+~~~
 
-用 VS Code 開啟專案資料夾時，`.vscode/tasks.json` 會在 `F5` 啟動前自動完成建立 venv 與安裝執行相依這兩步，不必手動執行上面的指令。
+When the project is opened in VS Code, .vscode/tasks.json automatically creates the virtual environment and installs runtime dependencies before F5 starts the application.
 
-## 步驟三：設定 `.env`
+## Step 3: Configure .env
 
-複製範例檔：
+Copy the example file:
 
-```powershell
+~~~powershell
 Copy-Item .env.example .env
-```
+~~~
 
-`.env` 內容：
+Example .env content:
 
-```ini
+~~~dotenv
 GOOGLE_MAPS_API_KEY="YOUR_GOOGLE_MAPS_API_KEY"
 PHONE_TAILSCALE_IP="100.x.x.x"
 API_SECRET_KEY="replace_with_a_long_random_secret"
@@ -123,93 +134,99 @@ FLASK_SESSION_SECRET="replace_with_another_random_secret"
 BIND_HOST="127.0.0.1"
 FLASK_PORT=5050
 TZ="Asia/Taipei"
-```
+~~~
 
-| 設定 | 必填 | 用途 |
-|---|---:|---|
-| `GOOGLE_MAPS_API_KEY` | 是 | Directions API 金鑰，缺少時任務規劃會失敗 |
-| `PHONE_TAILSCALE_IP` | 是 | 手機的 Tailscale IP，PC 送座標的目標（步驟四） |
-| `API_SECRET_KEY` | 是 | Dashboard `/login` 使用的密碼，長度不限 |
-| `API_ACCESS_KEY` | 否 | 任務控制 API 的 header 金鑰；省略時沿用 `API_SECRET_KEY` |
-| `FLASK_SESSION_SECRET` | 否 | Flask session cookie 簽章金鑰；省略時沿用 `API_SECRET_KEY` |
-| `BIND_HOST` | 否 | 額外開放的網路介面，預設 `127.0.0.1`（步驟四） |
-| `FLASK_PORT` | 否 | Dashboard 連接埠，預設 `5050` |
-| `TZ` | 否 | 執行期時區（IANA 名稱），預設 `Asia/Taipei` |
+| Setting | Required | Purpose |
+| --- | --- | --- |
+| GOOGLE_MAPS_API_KEY | Yes | Directions API key; route planning fails without it |
+| PHONE_TAILSCALE_IP | Yes | Phone Tailscale IP used as the GPS delivery target |
+| API_SECRET_KEY | Yes | Password used to sign in to the dashboard at /login |
+| API_ACCESS_KEY | No | Header key for task control APIs; falls back to API_SECRET_KEY when omitted |
+| FLASK_SESSION_SECRET | No | Signing key for the Flask session cookie; falls back to API_SECRET_KEY when omitted |
+| BIND_HOST | No | Additional network interface; defaults to 127.0.0.1 |
+| FLASK_PORT | No | Dashboard port; defaults to 5050 |
+| TZ | No | Runtime timezone using an IANA name; defaults to Asia/Taipei |
 
-三把金鑰的分工：`API_SECRET_KEY` 給人在瀏覽器登入，`API_ACCESS_KEY` 給 MacroDroid 與程式呼叫 API，`FLASK_SESSION_SECRET` 只用於簽 cookie。手機端 MacroDroid 要填的是實際生效的 `API_ACCESS_KEY`。
+The three key variables have different purposes:
 
-## 步驟四：Tailscale
+- API_SECRET_KEY is used for browser sign-in.
+- API_ACCESS_KEY is used by MacroDroid and other clients to call task APIs.
+- FLASK_SESSION_SECRET is used only to sign the session cookie.
 
-PC 與 Android 手機需登入同一個 tailnet。PC 透過手機的 Tailscale IP 呼叫 MacroDroid HTTP Server，手機也可透過 PC 的 Tailscale IP 呼叫任務控制 API。
+MacroDroid must use the effective API_ACCESS_KEY value.
 
-1. PC 與手機分別安裝 Tailscale 並以同一組帳號登入。
-2. 查 PC 的 Tailscale IP：
+## Step 4: Configure Tailscale
 
-   ```powershell
-   tailscale ip -4
-   ```
+The PC and Android phone must sign in to the same tailnet. The PC calls the MacroDroid HTTP server through the phone's Tailscale IP, and the phone can call the task control API through the PC's Tailscale IP.
 
-3. 查手機的 Tailscale IP：開啟手機的 Tailscale App，首頁即顯示本機的 `100.x.x.x`。
-4. 把手機 IP 填入 `.env`：
+1. Install Tailscale on both devices and sign in with the same account.
+2. Find the PC Tailscale IP:
 
-   ```ini
-   PHONE_TAILSCALE_IP="100.x.x.x"
-   ```
+~~~powershell
+tailscale ip -4
+~~~
 
-5. 若要讓手機連進 PC 的 Dashboard，把 PC 自己的 Tailscale IP 填入 `BIND_HOST`：
+3. Find the phone Tailscale IP in the Tailscale app. The home screen shows an address such as 100.x.x.x.
+4. Put the phone IP in .env:
 
-   ```ini
-   BIND_HOST="100.x.x.x"
-   ```
+~~~dotenv
+PHONE_TAILSCALE_IP="100.x.x.x"
+~~~
 
-`BIND_HOST` 是唯一的網路設定，只是「額外開放的介面」。填入 Tailscale IP 後服務會**同時**監聽 `127.0.0.1` 與該位址，兩個網址都可用：
+5. If the phone must open the PC dashboard, put the PC Tailscale IP in BIND_HOST:
 
-```text
-http://127.0.0.1:5050/map      # 本機
-http://100.x.x.x:5050/map      # 手機經 Tailscale
-```
+~~~dotenv
+BIND_HOST="100.x.x.x"
+~~~
 
-不要填 `0.0.0.0`。那會把未加密的 Dashboard 暴露在整個 LAN 上；服務一律以 HTTP 提供，session cookie 沒有 `Secure` 旗標，會以明文傳輸。
+BIND_HOST is the only network binding setting. It adds an interface while the service continues to listen on 127.0.0.1. Both URLs can then be used:
 
-Tailscale 未連線時，綁定該 IP 會失敗並印出提示；先確認 Tailscale 已連上再啟動。服務只提供 HTTP，沒有內建 HTTPS，請只在 Tailscale 或可信任內網使用；Tailscale 本身已對節點之間的流量加密。
+~~~text
+http://127.0.0.1:5050/map      # Local PC
+http://100.x.x.x:5050/map      # Phone through Tailscale
+~~~
 
-## 步驟五：手機端 GPS JoyStick
+Do not set BIND_HOST to 0.0.0.0. That would expose the unencrypted dashboard to the entire LAN. The service uses HTTP and does not set the Secure flag on the session cookie, so traffic is not protected by HTTPS.
 
-GPS JoyStick 是實際更新手機定位的軟體，MacroDroid 只是把 PC 送來的座標轉交給它。
+If Tailscale is disconnected, binding the configured address fails and the application prints a warning. Connect Tailscale before starting the service. Use the HTTP service only through Tailscale or a trusted private network. Tailscale encrypts traffic between its nodes, but this application does not provide built-in HTTPS.
 
-1. 安裝 GPS JoyStick（套件名 `com.theappninjas.fakegpsjoystick`）。
-2. 開啟手機的開發人員選項：「設定」→「關於手機」→ 連點「版本號碼」七次。
-3. 進入「設定」→「系統」→「開發人員選項」→「選取模擬位置應用程式」，選擇 **GPS JoyStick**。
-4. 開啟 GPS JoyStick，授予定位權限，並在地圖上手動移動一次搖桿，確認手機定位確實被改變。這一步先單獨驗證，可避免之後把手機端問題誤判成 PC 端問題。
-5. 關閉 GPS JoyStick 的電池最佳化，避免任務進行中被系統凍結。
+## Step 5: Configure GPS JoyStick on Android
 
-任務進行期間 GPS JoyStick 需保持在背景執行。
+GPS JoyStick is the application that updates the simulated phone location. MacroDroid only forwards coordinates from the PC to GPS JoyStick.
 
-## 步驟六：手機端 MacroDroid
+1. Install GPS JoyStick. Its package name is com.theappninjas.fakegpsjoystick.
+2. Enable Android Developer options by opening Settings, opening About phone, and tapping Build number seven times.
+3. Open Settings, System, Developer options, and Select mock location app. Choose GPS JoyStick.
+4. Open GPS JoyStick, grant location permission, and move the joystick manually once. Confirm that the phone location changes before testing the PC integration.
+5. Disable battery optimization for GPS JoyStick so that Android does not freeze it during a task.
 
-專案根目錄提供 `macrodroid-example.category`，可匯入 MacroDroid 作為範例分類。
+GPS JoyStick must remain running in the background while a task is active.
 
-1. 安裝 MacroDroid，依提示授予所需權限。
-2. 開啟 MacroDroid 的本機 HTTP Server，連接埠設為 **8080**。PC 端寫死 `http://<PHONE_TAILSCALE_IP>:8080/gps`，此埠號不可更改。HTTP Server 是 App 層設定，匯入分類不會一併帶入。
-3. 把 `macrodroid-example.category` 傳到手機，於 MacroDroid 匯入該分類，會得到三個 macro：`Mission Controller(example)`、`Move GPS(example)`、`Stop GPS(example)`。
-4. **匯入後三個 macro 預設為停用狀態，必須手動啟用**，否則不會有任何反應。
-5. 修改匯入後的內容：
-   - 區域變數 `g_server_url`：填 `http://<PC 的 Tailscale IP>:5050`。Mission Controller 與 Stop GPS 各有一份，兩邊都要改。
-   - HTTP Request header `API-ACCESS-KEY`：範例值為 `replace_with_API_ACCESS_KEY`，改成 `.env` 中實際生效的 `API_ACCESS_KEY`。
+## Step 6: Configure MacroDroid on Android
+
+The repository root contains macrodroid-example.category, which can be imported as an example category.
+
+1. Install MacroDroid and grant the requested permissions.
+2. Enable MacroDroid's local HTTP Server and set its port to 8080. The PC sends to http://{PHONE_TAILSCALE_IP}:8080/gps, so this port is fixed. The HTTP server is an app-level setting and is not included in the imported category.
+3. Transfer macrodroid-example.category to the phone and import it into MacroDroid. It provides three macros: Mission Controller (example), Move GPS (example), and Stop GPS (example).
+4. Enable all three imported macros manually. They are disabled by default.
+5. Update the imported macros:
+   - Set the g_server_url local variable to http://{PC_TAILSCALE_IP}:5050. Mission Controller and Stop GPS each have their own copy, so update both.
+   - Change the API-ACCESS-KEY HTTP request header from replace_with_API_ACCESS_KEY to the effective API_ACCESS_KEY value in .env.
 
 ### Mission Controller
 
-用途：在手機上輸入任務資料，送到 PC 的 `/start_task`。
+Mission Controller lets the user enter task data on the phone and sends it to /start_task on the PC.
 
-- Method：`POST`
-- URL：`{lv=g_server_url}/start_task`
-- Header：`API-ACCESS-KEY: <API_ACCESS_KEY>`
-- Content-Type：`application/json`
-- Timeout：30 秒即可；伺服器驗證後立即回 `202`，Google 路線由 worker 非同步規劃
+- Method: POST
+- URL: {lv=g_server_url}/start_task
+- Header: API-ACCESS-KEY: {API_ACCESS_KEY}
+- Content-Type: application/json
+- Timeout: 30 seconds is sufficient. The server validates the request and returns 202 immediately; the worker plans the Google route asynchronously.
 
-任務 JSON：
+Example task JSON:
 
-```json
+~~~json
 {
   "init_loc": "25.047800,121.517000",
   "stops": [
@@ -223,194 +240,206 @@ GPS JoyStick 是實際更新手機定位的軟體，MacroDroid 只是把 PC 送�
     }
   ]
 }
-```
+~~~
 
 ### Move GPS
 
-用途：接收 PC 傳來的座標，轉交 GPS JoyStick 更新模擬定位。
+Move GPS receives coordinates from the PC and forwards them to GPS JoyStick.
 
-觸發（MacroDroid HTTP Server）：
+MacroDroid HTTP Server trigger:
 
-- Method：`GET`
-- Path / Identifier：`gps`
-- Query params dictionary：`http_params`
-- Query params：`lat`、`lng`
-- 連接埠：`8080`（MacroDroid App 設定，見上方第 2 點）
+- Method: GET
+- Path or identifier: gps
+- Query parameter dictionary: http_params
+- Query parameters: lat and lng
+- Port: 8080
 
-動作（Send Intent）：
+Send Intent action:
 
-| 欄位 | 值 |
-|---|---|
-| Action | `theappninjas.gpsjoystick.TELEPORT` |
-| Package | `com.theappninjas.fakegpsjoystick` |
-| Target | `Service` |
-| Extra 1 | `lat`，型別 `Float`，值 `{lv=lat}` |
-| Extra 2 | `lng`，型別 `Float`，值 `{lv=lng}` |
+| Field | Value |
+| --- | --- |
+| Action | theappninjas.gpsjoystick.TELEPORT |
+| Package | com.theappninjas.fakegpsjoystick |
+| Target | Service |
+| Extra 1 | lat, type Float, value {lv=lat} |
+| Extra 2 | lng, type Float, value {lv=lng} |
 
-Extra 型別必須是 `Float`、Target 必須是 `Service`，填錯 GPS JoyStick 不會有反應。
+Extra values must use the Float type and Target must be Service. If either value is wrong, GPS JoyStick does not react.
 
-呼叫格式：
+Example request:
 
-```text
-http://<PHONE_TAILSCALE_IP>:8080/gps?lat=25.xxxxxxx&lng=121.xxxxxxx
-```
+~~~text
+http://{PHONE_TAILSCALE_IP}:8080/gps?lat=25.xxxxxxx&lng=121.xxxxxxx
+~~~
 
 ### Stop GPS
 
-用途：從手機呼叫 PC 的 `/stop_task`，停止伺服器端任務。
+Stop GPS calls /stop_task on the PC and stops the server-side task.
 
-- Method：`POST`
-- URL：`{lv=g_server_url}/stop_task`
-- Header：`API-ACCESS-KEY: <API_ACCESS_KEY>`
+- Method: POST
+- URL: {lv=g_server_url}/stop_task
+- Header: API-ACCESS-KEY: {API_ACCESS_KEY}
 
-停止後手機端會停留在最後一次收到的模擬座標。
+After stopping, the phone remains at the last simulated coordinate it received.
 
-## 步驟七：啟動
+## Step 7: Start the application
 
-用 VS Code 開啟專案資料夾後按 `F5`，選擇 `Mock GPS Follow Live Nav (web + worker)`。或在終端機執行：
+Open the project directory in VS Code, press F5, and select Mock GPS Follow Live Nav (web + worker). Alternatively, run:
 
-```powershell
-.venv\Scripts\python start_local.py
-```
+~~~powershell
+.venv/Scripts/python start_local.py
+~~~
 
-啟動後會印出 Dashboard 網址與網路模式。`start_local.py` 是單一進程：Flask dashboard 跑在背景執行緒，mission worker 跑在主執行緒，兩者共用同一個 SQLite 連線池與 log 設定。同一個資料夾一次只能跑一個實例，`data/instance.lock` 會擋下第二個。
+The application prints the dashboard URL and network mode after startup. start_local.py is a single process: the Flask dashboard runs in a background thread while the mission worker runs in the main thread. Both share the same SQLite connection pool and logging configuration.
 
-停止時按 `Ctrl+C`，或按 VS Code 的停止鍵。整個進程結束，不會留下任何背景服務。目前仍在 planning、queued、running 或 degraded 的任務會標記為 `interrupted`，下次啟動不會續跑，必須由使用者重新傳送指令。SQLite、歷史任務、movement CSV、logs 與封存檔都會保留。
+Only one instance can run in a project directory. data/instance.lock prevents a second instance.
 
-即使進程被強制終止（例如按 VS Code 停止鍵而非 Ctrl+C），下次啟動時 worker 取得 lease 後會自動把殘留在 `running` 的任務回收成 `interrupted`，並在 log 記錄 `Reclaimed N orphaned mission(s) on worker startup`。
+Stop the application with Ctrl+C or the VS Code stop button. The entire process exits without leaving a background service. Tasks that are still planning, queued, running, or degraded are marked interrupted. They are not resumed at the next startup and must be submitted again. SQLite data, task history, movement CSV files, logs, and archives are preserved.
 
-重啟後 Dashboard **不會**顯示上次被中斷的任務：狀態回到 `IDLE`，地圖上的規劃路線與軌跡都清空。該次執行的完整紀錄仍保留在任務歷史中，可從歷史頁面查看。任務表單則仍保留上次送出的站點，方便直接重新送出。
+If the process is forcefully terminated, the worker reclaims leftover running tasks after obtaining its lease, changes them to interrupted, and writes a log entry such as Reclaimed N orphaned mission(s) on worker startup.
 
-`completed`、`stopped`、`aborted`、`failed` 的任務不受影響，重啟後仍會顯示——那些是使用者主動造成的結果，需要被看到。
+After a restart, the dashboard returns to IDLE and does not display the interrupted task on the live map. The complete execution record remains available on the history page. The task form keeps the previously submitted stops so that the task can be resubmitted easily.
 
-## 步驟八：首次驗證
+Tasks with completed, stopped, aborted, or failed status are not removed during restart and remain visible as records of user-triggered outcomes.
 
-依序確認每一段連線，出問題時就能直接定位在哪一段。
+## Step 8: First verification
 
-1. **Dashboard**：瀏覽器開啟 `http://127.0.0.1:5050/map`，會導向 `/login`，輸入 `.env` 的 `API_SECRET_KEY`，應看到地圖與 `IDLE` 狀態。
-2. **手機端獨立驗證**：確認 Tailscale 兩端都已連線，在 PC 瀏覽器開啟
+Verify each connection separately so that a failure can be located quickly.
 
-   ```text
-   http://<PHONE_TAILSCALE_IP>:8080/gps?lat=25.0478&lng=121.5170
-   ```
+### Verification 1: Dashboard
 
-   頁面應回應 `OK`，且手機上的 GPS JoyStick 定位跳到該座標。這段成功代表 Tailscale、MacroDroid HTTP Server 與 GPS JoyStick intent 都正確。
-3. **送出測試任務**：在 PC 的 PowerShell 執行
+Open http://127.0.0.1:5050/map in a browser. It redirects to /login. Enter API_SECRET_KEY from .env and confirm that the map and IDLE status are visible.
 
-   ```powershell
-   $body = '{"init_loc":"25.047800,121.517000","stops":[{"name":"Taipei 101","mode":"walking"}]}'
-   Invoke-RestMethod -Uri http://127.0.0.1:5050/start_task -Method Post `
-     -Headers @{ "API-ACCESS-KEY" = "<API_ACCESS_KEY>" } `
-     -ContentType "application/json" -Body $body
-   ```
+### Verification 2: Android connection
 
-   應回傳 `202` 與 `mission_id`。
-4. **觀察 Dashboard**：狀態由 `planning` 轉為 `running`，地圖出現 Google 規劃路線，最後座標開始逐秒更新。
-5. **觀察手機**：GPS JoyStick 的定位沿著路線移動。
-6. **停止任務**：手機按 Stop GPS，或在 PC 執行
+Confirm that Tailscale is connected on both devices. From a PC browser, open:
 
-   ```powershell
-   Invoke-RestMethod -Uri http://127.0.0.1:5050/stop_task -Method Post `
-     -Headers @{ "API-ACCESS-KEY" = "<API_ACCESS_KEY>" }
-   ```
+~~~text
+http://{PHONE_TAILSCALE_IP}:8080/gps?lat=25.0478&lng=121.5170
+~~~
 
-任務規劃失敗時狀態會轉為 `failed`，原因可在 Dashboard 的 `last_error` 與錯誤 log 查看。
+The page should return OK and GPS JoyStick should move to the coordinate. This verifies Tailscale, the MacroDroid HTTP server, and the GPS JoyStick intent independently.
 
-## 任務 API
+### Verification 3: Submit a test task
 
-任務控制 API 只接受 header 金鑰，不接受 Dashboard 登入 session：
+Run the following command in PowerShell:
 
-```http
-API-ACCESS-KEY: <API_ACCESS_KEY>
+~~~powershell
+$body = '{"init_loc":"25.047800,121.517000","stops":[{"name":"Taipei 101","mode":"walking"}]}'
+Invoke-RestMethod -Uri http://127.0.0.1:5050/start_task -Method Post -Headers @{ "API-ACCESS-KEY" = "{API_ACCESS_KEY}" } -ContentType "application/json" -Body $body
+~~~
+
+The response should contain 202 and mission_id.
+
+### Verification 4: Observe the dashboard
+
+The status should change from planning to running, the planned route should appear, and the last coordinate should update every second.
+
+### Verification 5: Observe the phone
+
+GPS JoyStick should move along the route.
+
+### Verification 6: Stop the task
+
+Stop the task with Stop GPS on the phone or run the following command in PowerShell:
+
+~~~powershell
+Invoke-RestMethod -Uri http://127.0.0.1:5050/stop_task -Method Post -Headers @{ "API-ACCESS-KEY" = "{API_ACCESS_KEY}" }
+~~~
+
+If route planning fails, the status changes to failed. Check last_error on the dashboard and the error log for the cause.
+
+## Task API
+
+Task control APIs accept the header key and do not accept the dashboard login session.
+
+~~~http
+API-ACCESS-KEY: {API_ACCESS_KEY}
 Content-Type: application/json
-```
+~~~
 
-### 開始任務
+### Start a task
 
-```http
+~~~http
 POST /start_task
-```
+~~~
 
-成功回應為 `202 Accepted`，任務先進入 `planning`；規劃完成後由 worker 開始執行。規劃失敗時狀態改為 `failed`，原因可由系統狀態 API 與 Dashboard 的 `last_error` 查看。
+A successful response is 202 Accepted. The task first enters planning, and the worker starts execution after route planning completes. If planning fails, the task changes to failed and the reason is available through the system status API and dashboard last_error.
 
-欄位說明：
+| Field | Required | Description |
+| --- | --- | --- |
+| init_loc | Yes | Initial coordinate in lat,lng format |
+| stops | Yes | Array of task stops; at least 1 and at most 50 stops |
+| stops[].name | Yes | Place name or address recognized by Google Maps |
+| stops[].mode | Yes | walking, transit, or motorcycle; motorcycle maps to Google's two_wheeler mode |
+| stops[].transit_type | No | AUTO, MRT, BUS, or an empty string; used only with transit |
+| stops[].wait_time | No | Local HH:MM time. The task waits until this time after arriving at the stop |
+| stops[].skip_if_late | No | If the arrival time has passed wait_time, true departs immediately and false waits until the same time on the next day |
+| stops[].coord | No | Final coordinate in lat,lng format. The task first navigates by place name, then walks in a straight line at 1.4 m/s to this coordinate |
 
-| 欄位 | 必填 | 說明 |
-|---|---:|---|
-| `init_loc` | 是 | 初始座標，格式為 `lat,lng` |
-| `stops` | 是 | 任務站點陣列，至少 1 筆，最多 50 筆 |
-| `stops[].name` | 是 | Google Maps 可辨識的地名或地址 |
-| `stops[].mode` | 是 | `walking`、`transit`、`motorcycle`；`motorcycle` 對應 Google 的 `two_wheeler` |
-| `stops[].transit_type` | 否 | `AUTO`、`MRT`、`BUS` 或空字串，只有 `transit` 使用 |
-| `stops[].wait_time` | 否 | `HH:MM` 本地時刻，抵達該站後等到這個時間才出發 |
-| `stops[].skip_if_late` | 否 | 抵達時已過 `wait_time` 時，`true` 立即出發，`false` 等到隔天同一時刻 |
-| `stops[].coord` | 否 | 最終精準對位座標，格式為 `lat,lng`；先以地點名稱導航，再以 1.4 m/s 直線步行到此座標 |
+### Stop a task
 
-### 停止任務
-
-```http
+~~~http
 POST /stop_task
-```
+~~~
 
-## Web 監控
+## Web monitoring
 
-```text
-http://localhost:5050/map
-```
+Open http://localhost:5050/map after signing in.
 
-網頁可查看：
+The dashboard displays:
 
-- 任務狀態：`idle`、`planning`、`queued`、`running`、`degraded`、`completed`、`interrupted`、`aborted`、`failed`
-- 已完成站點 / 總站點
-- 目前目標
-- 最後送出的座標
-- Tailscale P2P 目標
-- 初始／最新 Google ETA、schedule debt 與手機健康狀態
-- Google Maps 規劃路線
-- Google Maps 導航歷史詳細資訊
-- 即時 movement CSV
-- 系統、路線、錯誤、安全 log
-- 任務歷史列表
+- Task status: idle, planning, queued, running, degraded, completed, interrupted, aborted, or failed
+- Completed stops and total stops
+- Current target
+- Last coordinate sent to the phone
+- Tailscale peer-to-peer target
+- Initial and latest Google ETA, schedule debt, and phone health status
+- Google Maps planned route
+- Detailed Google Maps navigation history
+- Live movement CSV data
+- System, route, error, and security logs
+- Task history list
 
-選取歷史 session 後會開啟 `/history/<date>/<session>` 新分頁。原 LIVE Dashboard 不會切換模式或停止輪詢；History 分頁中的所有資料按鈕只讀取 URL 指定的 session，缺少資料時不會退回顯示 LIVE 資料。CSV 按鈕以分頁資料表顯示內容，不提供原始檔下載。
+Selecting a history session opens /history/{date}/{session} in a new tab. The live dashboard continues its normal polling and does not switch modes or stop. All data buttons on a history page read only the session identified by the URL. If a historical data source is missing, the page does not fall back to live data. The CSV button displays a paginated table instead of downloading the original file.
 
-網頁不顯示電腦硬體資訊。
+The web page does not display computer hardware information.
 
-## 監控 API
+## Monitoring API
 
-監控 API 可使用登入 session 或 `API-ACCESS-KEY`。
+Monitoring APIs accept either a login session or API-ACCESS-KEY.
 
-| API | 說明 |
-|---|---|
-| `GET /api/system_status` | 任務狀態、最後座標、P2P 目標、設定、log session |
-| `GET /api/planned_route?route_token=<mission:revision>` | 目前規劃路線座標；版本未變回 304 |
-| `GET /api/navigation_history` | 目前任務的導航歷史詳細資訊 |
-| `GET /api/movements/current?offset=N&limit=250` | 以 byte cursor 分頁讀取目前 movement JSON |
-| `GET /api/log/all` | 目前任務完整 log |
-| `GET /api/log/route` | 路線 log |
-| `GET /api/log/error` | warning / error log |
-| `GET /api/log/security` | 安全事件 log |
-| `GET /api/mission` | 目前任務資料 |
-| `GET /api/history` | 任務歷史列表 |
-| `GET /api/history/<date>/<session>/status` | 固定 session 的任務狀態與 ETA |
-| `GET /api/history/<date>/<session>/planned_route` | 固定 session 的規劃路線 |
-| `GET /api/history/<date>/<session>/navigation` | 固定 session 的 Navigation 詳細資料 |
-| `GET /api/history/<date>/<session>/movements?offset=N&limit=250` | 歷史或封存任務 movement JSON |
-| `GET /api/history/<date>/<session>/log/<log_name>` | 歷史任務 log |
+| API | Description |
+| --- | --- |
+| GET /api/system_status | Task status, last coordinate, peer target, settings, and log session |
+| GET /api/planned_route?route_token={mission:revision} | Current planned route coordinates; returns 304 when the revision is unchanged |
+| GET /api/navigation_history | Detailed navigation history for the current task |
+| GET /api/movements/current?offset=N&limit=250 | Reads the current movement JSON with a byte cursor |
+| GET /api/log/all | Complete log for the current task |
+| GET /api/log/route | Route log |
+| GET /api/log/error | Warning and error log |
+| GET /api/log/security | Security event log |
+| GET /api/mission | Current task data |
+| GET /api/history | Task history list |
+| GET /api/history/{date}/{session}/status | Task status and ETA for a fixed session |
+| GET /api/history/{date}/{session}/planned_route | Planned route for a fixed session |
+| GET /api/history/{date}/{session}/navigation | Detailed navigation data for a fixed session |
+| GET /api/history/{date}/{session}/movements?offset=N&limit=250 | Movement JSON for a historical or archived task |
+| GET /api/history/{date}/{session}/log/{log_name} | Log for a historical task |
 
-movement record 的 `sequence` 是 session 內單調遞增列序號；`next_offset` 則是伺服器端 byte cursor，兩者不可混用。
+The movement record sequence is a monotonically increasing row number within a session. next_offset is a server-side byte cursor. These values must not be used interchangeably.
 
-## Log 系統
+## Log system
 
-常駐 log：
+Persistent application log:
 
-```text
-logs/app.log     # start_local.py（web + worker 同一進程）
-```
+~~~text
+logs/app.log     # start_local.py: web and worker in one process
+~~~
 
-每次任務會建立獨立 session：
+Each task creates an independent session:
 
-```text
+~~~text
 logs/YYYY-MM-DD/HH-MM-SS/
 ├─ all.log
 ├─ route.log
@@ -418,41 +447,41 @@ logs/YYYY-MM-DD/HH-MM-SS/
 ├─ security.log
 ├─ mission.json
 └─ movement.csv
-```
+~~~
 
-`movement.csv` 欄位：
+movement.csv columns:
 
-```csv
+~~~text
 Sequence,Timestamp,Latitude,Longitude,Action,Note,TimestampISO,DeltaSeconds,DistanceMeters
-```
+~~~
 
-- `Sequence`：session 內單調遞增的 movement 列序號。
-- `Timestamp`：以 UTC 儲存，含毫秒與 `Z` 標記；Dashboard 依 `TZ` 轉換後顯示。
-- `TimestampISO`：aware UTC ISO 時間，含毫秒；Dashboard 依 `TZ` 轉換後顯示。
-- `DeltaSeconds`：與上一筆實際紀錄的時間差，單位秒。
-- `DistanceMeters`：與上一筆實際紀錄座標的距離，單位公尺。
+- Sequence: monotonically increasing movement row number within the session.
+- Timestamp: UTC timestamp with milliseconds and a Z marker; the dashboard converts it using TZ.
+- TimestampISO: aware UTC ISO timestamp with milliseconds; the dashboard converts it using TZ.
+- DeltaSeconds: time difference in seconds from the previous recorded movement.
+- DistanceMeters: distance in meters from the previous recorded coordinate.
 
-移動期間 CSV 以真實系統秒數記錄。任務完成後仍每秒傳送終點座標給手機，但 CSV 只在完成時及每 60 秒寫一筆 heartbeat。超過 30 日的 session 會在驗證 ZIP 完整性後刪除原目錄，ZIP 保存於 `logs/archives/` 並可由 Dashboard 按需解壓回放。
+During movement, CSV records use real system seconds. After a task completes, the phone still receives the final coordinate every second, but the CSV writes only a completion record and one heartbeat every 60 seconds.
 
-## `settings.json`
+Sessions older than 30 days are deleted from their original directories after ZIP integrity is verified. The ZIP files are stored in logs/archives/ and can be extracted by the dashboard for playback.
 
-設定檔位置：
+## settings.json
 
-```text
+Configuration file:
+
+~~~text
 mock_gps/resources/settings.json
-```
+~~~
 
-主要設定：
+| Setting | Default | Description |
+| --- | --- | --- |
+| mrt_station_groups | Grouped station data | Taipei MRT station coordinates organized by route |
 
-| 設定 | 預設 | 說明 |
-|---|---:|---|
-| `mrt_station_groups` | 分組站點資料 | 依路線整理的台北捷運站座標 |
+At startup, the application flattens mrt_station_groups into the internal MRT arrival-detection data.
 
-程式啟動時會自動將 `mrt_station_groups` 攤平成內部使用的 MRT 到站偵測資料庫。
+## Project structure
 
-## 專案結構
-
-```text
+~~~text
 mock-gps-follow-live-nav/
 ├─ start_local.py
 ├─ pyproject.toml
@@ -470,10 +499,10 @@ mock-gps-follow-live-nav/
 │  ├─ tasks.json
 │  └─ settings.json
 ├─ tests/
-├─ data/                        # 執行期產生
+├─ data/                        # Generated at runtime
 │  ├─ mock_gps.sqlite3
 │  └─ instance.lock
-├─ logs/                        # 執行期產生
+├─ logs/                        # Generated at runtime
 └─ mock_gps/
    ├─ config.py
    ├─ db.py
@@ -484,83 +513,79 @@ mock-gps-follow-live-nav/
    ├─ resources/settings.json
    ├─ static/
    └─ templates/
-```
+~~~
 
-`data/` 與 `logs/` 由程式在第一次啟動時建立，兩者都不進版控。
+data/ and logs/ are created by the application on the first startup and are not committed to version control.
 
-## 開發與測試
+## Development and testing
 
-`start_local.py` 是唯一的進入點，把 web 與 worker 跑在同一個進程，適合日常開發與除錯：VS Code 的中斷點在兩邊都有效。同一個資料夾一次只能跑一個實例——`data/instance.lock` 會擋下第二個，worker lease 也只允許一個持有者。
+start_local.py is the single entry point for the web application and worker, which makes it suitable for daily development and debugging. VS Code breakpoints work in both components. Only one instance can run in a directory; data/instance.lock and the worker lease prevent multiple owners.
 
-送出變更前執行：
+Before submitting changes, run:
 
-```powershell
-.venv\Scripts\python -m pip install -r requirements-dev.txt
-.venv\Scripts\python -m ruff check .
-.venv\Scripts\python -m compileall -q mock_gps start_local.py
-.venv\Scripts\python -m pytest
-```
+~~~powershell
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+.venv/Scripts/python -m ruff check .
+.venv/Scripts/python -m compileall -q mock_gps start_local.py
+.venv/Scripts/python -m pytest
+~~~
 
-`.github/workflows/ci.yml` 會在 ubuntu 與 windows 上以 Python 3.10 跑同一組檢查。
+.github/workflows/ci.yml runs the same checks on Ubuntu and Windows with Python 3.10.
 
-## 資訊安全
+## Security
 
-- 任務控制 API 必須使用獨立的 `API_ACCESS_KEY`，且不接受 Dashboard 登入 session
-- Web dashboard 需登入或使用有效 API key
-- API key 使用 constant-time comparison
-- 登入失敗與「帶了錯誤 API key」的請求採滑動視窗節流：同一來源 5 分鐘內失敗 5 次即回 `429`。完全沒帶 key 只回 `401`，讓瀏覽器能正常導向 `/login`
-- Flask session cookie 一律設定 `HttpOnly`、`SameSite=Strict`；因為服務以 HTTP 提供，不啟用 `Secure`
-- Log 不記錄完整 API key，未授權請求只留遮罩後的前綴；登入成功與失敗事件會記入 security log
-- Response 加入安全標頭：
-  - `X-Content-Type-Options: nosniff`
-  - `X-Frame-Options: DENY`
-  - `Referrer-Policy: no-referrer`
-  - `Cache-Control: no-store`
-- 建議只在 Tailscale 或可信任網路中使用
+- Task control APIs require a separate API_ACCESS_KEY and do not accept the dashboard login session.
+- The web dashboard requires a login session or a valid API key.
+- API keys are compared using a constant-time comparison.
+- Login failures and requests with an incorrect API key are rate limited in a sliding window. Five failures from the same source within five minutes return 429. Requests with no key return 401 so that browsers can redirect to /login.
+- Flask session cookies use HttpOnly and SameSite=Strict. Secure is not enabled because the service uses HTTP.
+- Logs never record a complete API key. Unauthorized requests keep only a masked prefix, and successful and failed login events are written to the security log.
+- Responses include X-Content-Type-Options: nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer, and Cache-Control: no-store.
+- Use the application only through Tailscale or another trusted private network.
 
-## GitHub 上傳前檢查
+## GitHub upload checklist
 
-可上傳的範例與設定：
+Safe example and configuration files:
 
-- `.env.example`
-- `macrodroid-example.category`
-- `.vscode/launch.json`、`.vscode/tasks.json`、`.vscode/settings.json`
-- `mock_gps/resources/settings.json`
+- .env.example
+- macrodroid-example.category
+- .vscode/launch.json, .vscode/tasks.json, and .vscode/settings.json
+- mock_gps/resources/settings.json
 
-不應上傳的本機資料：
+Local files that must not be uploaded:
 
-- `.env`
-- `logs/`
-- `data/`
-- `*.log`
-- `*.csv`
-- `.venv/`
-- `AI.md`
-- 其他 IDE 本機設定
+- .env
+- logs/
+- data/
+- *.log
+- *.csv
+- .venv/
+- AI.md
+- Other IDE-specific local settings
 
-## 疑難排解
+## Troubleshooting
 
-| 問題 | 檢查項目 |
-|---|---|
-| 無法啟動伺服器 | 檢查 `.env` 是否存在，`API_SECRET_KEY` 是否已設定 |
-| 啟動時提示無法綁定位址 | 確認 Tailscale 已連線、`BIND_HOST` 是本機真的擁有的位址、`FLASK_PORT` 未被占用 |
-| 啟動時提示已在執行 | 同資料夾只能跑一個實例，先關閉既有進程 |
-| Google Maps 沒有路線 | 檢查 `GOOGLE_MAPS_API_KEY`、Directions API 是否啟用、Google Cloud 帳單是否正常 |
-| 手機沒收到座標 | 依步驟八第 2 點單獨驗證：檢查 Tailscale、`PHONE_TAILSCALE_IP`、MacroDroid HTTP Server 是否開啟且為 8080、手機防火牆 |
-| 手機收到 `OK` 但定位沒變 | 檢查模擬位置應用程式是否選為 GPS JoyStick、GPS JoyStick 是否在背景執行、Send Intent 的 Target 是否為 `Service`、`lat`/`lng` 型別是否為 `Float` |
-| MacroDroid 完全沒反應 | 確認匯入後的三個 macro 已啟用（匯入時預設停用） |
-| MacroDroid 任務送出失敗 | 檢查 `g_server_url`、`API-ACCESS-KEY`、Tailscale 連線 |
-| `/api/*` 回傳 401 | 重新登入 `/login` 或確認 `API-ACCESS-KEY` |
-| 登入或 API 回傳 429 | 同來源 5 分鐘內驗證失敗 5 次會被節流，等視窗過期再試 |
-| 地圖空白 | 檢查本機 vendor 靜態資源與瀏覽器 console |
-| 沒有歷史 CSV | 確認任務已開始，並檢查 `logs/YYYY-MM-DD/HH-MM-SS/` |
+| Problem | What to check |
+| --- | --- |
+| The server does not start | Confirm that .env exists and API_SECRET_KEY is set |
+| The application cannot bind the configured address | Confirm that Tailscale is connected, BIND_HOST belongs to the local machine, and FLASK_PORT is available |
+| The application reports that it is already running | Only one instance is allowed in a directory; stop the existing process |
+| Google Maps returns no route | Check GOOGLE_MAPS_API_KEY, Directions API activation, and Google Cloud billing |
+| The phone receives no coordinate | Follow the independent Android verification in Step 8. Check Tailscale, PHONE_TAILSCALE_IP, the MacroDroid HTTP server on port 8080, and the phone firewall |
+| The phone returns OK but its location does not change | Confirm GPS JoyStick is selected as the mock location app, is running in the background, uses Target Service, and receives Float values for lat and lng |
+| MacroDroid does nothing | Confirm that all three imported macros are enabled; they are disabled by default |
+| MacroDroid cannot submit a task | Check g_server_url, API-ACCESS-KEY, and the Tailscale connection |
+| /api/* returns 401 | Sign in again at /login or provide API-ACCESS-KEY |
+| Login or API requests return 429 | Five verification failures from the same source within five minutes trigger rate limiting; wait for the window to expire |
+| The map is blank | Check local vendor assets and the browser console |
+| No historical CSV is available | Confirm that a task has started and check logs/YYYY-MM-DD/HH-MM-SS/ |
 
-## 授權
+## License
 
-本專案採用 MIT License，詳細內容請見 [LICENSE](LICENSE)。
+This project is licensed under the MIT License. See LICENSE for the full text.
 
-## 作者
+## Author
 
 Yang Sheng-Wen
 
-[https://github.com/YangShengWen-0505](https://github.com/YangShengWen-0505)
+https://github.com/YangShengWen-0505
