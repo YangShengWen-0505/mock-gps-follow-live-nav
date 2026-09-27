@@ -61,8 +61,6 @@ body::before {
 }
 
 .dark-filter .leaflet-tile-pane { filter: grayscale(72%) invert(100%) contrast(88%); }
-.leaflet-control-attribution { display: none; }
-
 #dashboard-shell {
     position: fixed;
     inset: 0;
