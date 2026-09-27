@@ -6,6 +6,7 @@
     <title>{{ 'Mock GPS Follow Live Nav History · ' ~ page_context.id if page_context.mode == 'history' else 'Mock GPS Follow Live Nav Dashboard' }}</title>
     <meta name="description" content="Operational dashboard for route simulation, movement logs, and GPS playback.">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.16.0/dist/maplibre-gl.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/fontawesome/css/all.min.css') }}">
     {# Order matters: responsive.css must stay last so its breakpoints win. #}
     <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
@@ -134,7 +135,8 @@
                 <section class="panel-block">
                     <div class="section-title"><i class="fa-solid fa-layer-group"></i> Basemap</div>
                     <select id="mapLayerSelect">
-                        <option value="cartoDark" selected>CartoDB Dark</option>
+                        <option value="openFreeMap" selected>OpenFreeMap Liberty</option>
+                        <option value="cartoDark">CartoDB Dark</option>
                         <option value="osmDark">OSM Standard</option>
                     </select>
                 </section>
@@ -214,6 +216,8 @@
 
     <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
     <script src="{{ url_for('static', filename='vendor/leaflet-polylinedecorator/leaflet.polylineDecorator.js') }}"></script>
+    <script src="https://unpkg.com/maplibre-gl@5.16.0/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
     <script id="page-context" type="application/json">{{ page_context|tojson }}</script>
     <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

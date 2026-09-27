@@ -66,16 +66,28 @@ export function initMap() {
     if (typeof L === "undefined") {
         throw new Error("Leaflet failed to load from /static/vendor/. Reload the page; if it persists, reinstall the app assets.");
     }
+    if (typeof L.maplibreGL !== "function") {
+        throw new Error("OpenFreeMap renderer failed to load. Check the MapLibre CDN connection and reload the page.");
+    }
 
     map = L.map("map", { zoomControl: false, preferCanvas: true }).setView([25.1673, 121.4466], 15);
     L.control.zoom({ position: "bottomright" }).addTo(map);
 
+    const openFreeMapAttribution = [
+        '<a href="https://openfreemap.org/" target="_blank" rel="noopener">OpenFreeMap</a>',
+        '<a href="https://openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a>',
+        '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>',
+    ].join(" · ");
     const baseMaps = {
         osmDark: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }),
         cartoDark: L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 20 }),
+        openFreeMap: L.maplibreGL({
+            style: "https://tiles.openfreemap.org/styles/liberty",
+            attributionControl: { customAttribution: openFreeMapAttribution },
+        }),
     };
 
-    currentBaseLayer = baseMaps.cartoDark;
+    currentBaseLayer = baseMaps.openFreeMap;
     currentBaseLayer.addTo(map);
     polylinesLayer = L.featureGroup().addTo(map);
     pointsLayer = L.featureGroup().addTo(map);
