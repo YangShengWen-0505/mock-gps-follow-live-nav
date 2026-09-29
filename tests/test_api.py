@@ -89,6 +89,13 @@ def test_health_is_public(tmp_path, monkeypatch):
     assert response.get_json() == {"status": "ok"}
 
 
+def test_security_headers_keep_cross_origin_origin_for_map_tiles(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    with app.test_client() as client:
+        response = client.get("/health")
+    assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+
+
 def test_dashboard_exposes_configured_display_timezone(tmp_path, monkeypatch):
     app = _app(tmp_path, monkeypatch)
     with app.test_client() as client:

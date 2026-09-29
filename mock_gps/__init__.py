@@ -66,7 +66,9 @@ def create_app():
         # exposed over Tailscale and authenticated with a shared API key.
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        # OSM's public tile service requires a valid Referer from web pages.
+        # Send only the cross-origin origin, rather than the full dashboard URL.
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         if request.path.startswith("/static/vendor/") and response.status_code == 200:
             # Vendored Leaflet/Font Awesome are pinned by filename and never
             # change in place. This must override rather than setdefault:

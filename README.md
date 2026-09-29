@@ -488,7 +488,7 @@ mock-gps-follow-live-nav/
 - Response 加入安全標頭：
   - `X-Content-Type-Options: nosniff`
   - `X-Frame-Options: DENY`
-  - `Referrer-Policy: no-referrer`
+  - `Referrer-Policy: strict-origin-when-cross-origin` (keeps the origin available for compliant map tile providers)
   - `Cache-Control: no-store`
 - 建議只在 Tailscale 或可信任網路中使用
 
