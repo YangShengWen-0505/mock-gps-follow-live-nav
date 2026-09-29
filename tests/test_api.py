@@ -98,6 +98,16 @@ def test_dashboard_exposes_configured_display_timezone(tmp_path, monkeypatch):
     assert f'"timezone": "{config.TIMEZONE}"' in response.get_data(as_text=True)
 
 
+def test_dashboard_exposes_configured_carto_basemap_key(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "CARTO_BASEMAP_API_KEY", "carto-test-key")
+    with app.test_client() as client:
+        _login(client)
+        response = client.get("/map")
+    assert response.status_code == 200
+    assert '"carto_basemap_api_key": "carto-test-key"' in response.get_data(as_text=True)
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [

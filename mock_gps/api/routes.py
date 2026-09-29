@@ -353,7 +353,11 @@ def show_map():
         return redirect(url_for("api.login"))
     return render_template(
         "map.html",
-        page_context={"mode": "live", "timezone": str(config.TIMEZONE)},
+        page_context={
+            "mode": "live",
+            "timezone": str(config.TIMEZONE),
+            "carto_basemap_api_key": config.CARTO_BASEMAP_API_KEY,
+        },
     )
 
 
@@ -370,6 +374,7 @@ def show_history(date_value: str, session_value: str):
         page_context={
             "mode": "history",
             "timezone": str(config.TIMEZONE),
+            "carto_basemap_api_key": config.CARTO_BASEMAP_API_KEY,
             "date": date_value,
             "session": session_value,
             "id": f"{date_value}/{session_value}",
