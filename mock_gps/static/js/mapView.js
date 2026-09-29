@@ -1,4 +1,5 @@
 import { $, escapeHtml, formatDateTime } from "./ui.js";
+import { pageContext } from "./context.js";
 
 export const colors = {
     walk: "#30D158",
@@ -62,6 +63,12 @@ function fixLayerOrder() {
     if ($("showPoints").checked) pointsLayer.bringToFront();
 }
 
+function cartoTileUrl(url) {
+    const key = String(pageContext.carto_basemap_api_key || "").trim();
+    if (!key) return url;
+    return `${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}`;
+}
+
 export function initMap() {
     if (typeof L === "undefined") {
         throw new Error("Leaflet failed to load from /static/vendor/. Reload the page; if it persists, reinstall the app assets.");
@@ -78,9 +85,20 @@ export function initMap() {
         '<a href="https://openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a>',
         '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>',
     ].join(" · ");
+    const osmAttribution = '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a>';
+    const cartoAttribution = [
+        '<a href="https://carto.com/attributions" target="_blank" rel="noopener">© CARTO</a>',
+        osmAttribution,
+    ].join(" · ");
     const baseMaps = {
-        osmDark: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }),
-        cartoDark: L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 20 }),
+        osmDark: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: 19,
+            attribution: osmAttribution,
+        }),
+        cartoDark: L.tileLayer(cartoTileUrl("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"), {
+            maxZoom: 20,
+            attribution: cartoAttribution,
+        }),
         openFreeMap: L.maplibreGL({
             style: "https://tiles.openfreemap.org/styles/liberty",
             attributionControl: { customAttribution: openFreeMapAttribution },

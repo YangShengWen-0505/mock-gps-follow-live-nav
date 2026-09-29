@@ -15,6 +15,7 @@ if hasattr(time, 'tzset') and 'TZ' in os.environ:
     time.tzset()
 
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip().strip('"')
+CARTO_BASEMAP_API_KEY = os.getenv("CARTO_BASEMAP_API_KEY", "").strip().strip('"')
 PHONE_TAILSCALE_IP = os.getenv("PHONE_TAILSCALE_IP", "").strip().strip('"')
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip().strip('"')
 API_ACCESS_KEY = os.getenv("API_ACCESS_KEY", API_SECRET_KEY).strip().strip('"')

@@ -554,7 +554,7 @@ Before submitting changes, run:
 - Login failures and requests with an incorrect API key are rate limited in a sliding window. Five failures from the same source within five minutes return 429. Requests with no key return 401 so that browsers can redirect to /login.
 - Flask session cookies use HttpOnly and SameSite=Strict. Secure is not enabled because the service uses HTTP.
 - Logs never record a complete API key. Unauthorized requests keep only a masked prefix, and successful and failed login events are written to the security log.
-- Responses include X-Content-Type-Options: nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer, and Cache-Control: no-store.
+- Responses include X-Content-Type-Options: nosniff, X-Frame-Options: DENY, Referrer-Policy: strict-origin-when-cross-origin, and Cache-Control: no-store. The policy keeps the origin available for compliant map tile providers without sending the full dashboard path.
 - Use the application only through Tailscale or another trusted private network.
 
 ## GitHub upload checklist
