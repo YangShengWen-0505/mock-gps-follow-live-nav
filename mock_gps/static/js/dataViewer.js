@@ -4,6 +4,22 @@ import { $, displayTimeZone, escapeHtml, formatDateTime, openModal, renderError 
 
 let csvOffsets = [0];
 let csvPageIndex = 0;
+let csvStream = null;
+let activeRequest = null;
+let requestVersion = 0;
+
+function beginRequest() {
+    activeRequest?.abort();
+    activeRequest = new AbortController();
+    return { version: ++requestVersion, signal: activeRequest.signal };
+}
+
+document.addEventListener("modalclosed", (event) => {
+    if (event.detail === "data-modal") {
+        activeRequest?.abort();
+        requestVersion += 1;
+    }
+});
 
 function setTitle(value) {
     $("data-modal-title").textContent = `${value} · ${contextLabel()}`;
@@ -44,21 +60,32 @@ function renderCsvPage(page) {
 
 async function loadCsvPage(index) {
     if (index < 0) return;
+    const request = beginRequest();
     csvPageIndex = index;
     $("data-body").innerHTML = '<div class="empty-state">Loading movement records...</div>';
     try {
         const page = await fetchJson(
             `${dataUrls.movements}?offset=${csvOffsets[index] || 0}&limit=250`,
             `Unable to load movement records for ${contextLabel()}.`,
+            { signal: request.signal },
         );
+        if (request.version !== requestVersion) return;
+        if (csvStream && page.stream_id !== csvStream) {
+            csvOffsets = [0];
+            csvStream = page.stream_id;
+            return loadCsvPage(0);
+        }
+        csvStream = page.stream_id;
         renderCsvPage(page);
     } catch (error) {
+        if (request.version !== requestVersion || request.signal.aborted) return;
         renderError($("data-body"), error.message || "Unable to load movement records.");
     }
 }
 
 export function openCsvViewer() {
     csvOffsets = [0];
+    csvStream = null;
     csvPageIndex = 0;
     setTitle("CSV contents");
     openModal("data-modal");
@@ -66,18 +93,21 @@ export function openCsvViewer() {
 }
 
 export async function openLogViewer(logName) {
+    const request = beginRequest();
     setTitle(`${logName.charAt(0).toUpperCase()}${logName.slice(1)} log`);
     openModal("data-modal");
     $("data-body").innerHTML = '<div class="empty-state">Loading log...</div>';
     try {
-        const response = await apiFetch(dataUrls.log(logName));
+        const response = await apiFetch(dataUrls.log(logName), { signal: request.signal });
         const text = await response.text();
+        if (request.version !== requestVersion) return;
         if (!response.ok) {
             $("data-body").innerHTML = `<div class="empty-state">${escapeHtml(text || "This session has no data for this log.")}</div>`;
             return;
         }
         $("data-body").innerHTML = `<pre class="log-viewer">${escapeHtml(text || "This session has no data for this log.")}</pre>`;
     } catch (error) {
+        if (request.version !== requestVersion || request.signal.aborted) return;
         renderError($("data-body"), error.message || "Unable to load log data.");
     }
 }

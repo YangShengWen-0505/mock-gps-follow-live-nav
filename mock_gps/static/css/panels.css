@@ -120,7 +120,15 @@ body.status-collapsed .status-toggle {
     gap: 8px;
 }
 
-input[type="checkbox"] { display: none; }
+input[type="checkbox"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    clip-path: inset(50%);
+    overflow: hidden;
+}
+input[type="checkbox"]:focus-visible + .toggle-switch { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 .toggle-switch {
     position: relative;
@@ -405,3 +413,9 @@ input[type="range"] {
     background: var(--green);
     color: #07120b;
 }
+
+/* Keep history window controls on their own row on narrow desktops. */
+.history-playback { flex-wrap: wrap; }
+.history-playback .slider-container { flex: 1 1 220px; }
+.history-playback #historyEarlier,
+.history-playback #historyLater { flex: 1 1 100px; width: auto; }

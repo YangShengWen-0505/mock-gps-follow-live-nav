@@ -109,7 +109,8 @@ function bindShellControls() {
 
 async function boot() {
     try {
-        initMap();
+        try { initMap(); }
+        catch (error) { showToast(error.message, "error"); }
         bindShellControls();
         bindPlaybackControls();
         await refreshSystemStatus();

@@ -1,5 +1,7 @@
 import math
 import re
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Any
@@ -12,12 +14,12 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 PRECISION_WALK_SPEED_MPS = 1.4
 
 
+class PlanningCancelled(Exception):
+    """The owner cancelled planning; this is not a routing failure."""
+
+
 def _instruction_text(value: str) -> str:
     return unescape(_HTML_TAG.sub("", value)).strip()
-
-
-def _google_mode(mode: str) -> str:
-    return "two_wheeler" if mode == "motorcycle" else mode
 
 
 def _select_route(routes: list[dict], transit_type: str) -> dict:
@@ -94,14 +96,28 @@ def _precision_alignment_step(steps: list[dict], leg: dict, coord: str) -> dict 
     }
 
 
-def plan_mission(init_loc: str, stops: list[dict], *, start_time: datetime | None = None) -> dict[str, Any]:
+def plan_mission(
+    init_loc: str, stops: list[dict], *, start_time: datetime | None = None,
+    should_continue: Callable[[], bool] | None = None, max_seconds: float = 300,
+) -> dict[str, Any]:
     if not config.gmaps_client:
         raise RuntimeError("Google Maps client is not configured")
+    deadline = time.monotonic() + max_seconds
+
+    def check_planning() -> None:
+        if should_continue and not should_continue():
+            raise PlanningCancelled()
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Mission planning exceeded its time budget")
+
     departure = start_time or config.local_now()
     origin = init_loc
     routes: list[dict] = []
     for index, stop in enumerate(stops):
-        mode = _google_mode(stop.get("mode", "walking"))
+        check_planning()
+        mode = stop.get("mode", "walking")
+        if mode not in {"walking", "transit"}:
+            raise ValueError("mode must be walking or transit")
         transit_type = stop.get("transit_type", "")
         kwargs: dict[str, Any] = {
             "mode": mode,
@@ -114,6 +130,7 @@ def plan_mission(init_loc: str, stops: list[dict], *, start_time: datetime | Non
         destination = stop["name"]
         precision_coord = stop.get("coord", "")
         options = config.gmaps_client.directions(origin, destination, **kwargs)
+        check_planning()
         if not options:
             raise RuntimeError(f"Google returned no route for stop {index + 1}: {stop['name']}")
         selected = _select_route(options, transit_type)
@@ -135,6 +152,12 @@ def plan_mission(init_loc: str, stops: list[dict], *, start_time: datetime | Non
                 "distance_meters": int(step.get("distance", {}).get("value", 0)),
                 "points": [[lat, lng] for lat, lng in points],
                 "instruction": _instruction_text(step.get("html_instructions", "")),
+                "departure_stop": transit.get("departure_stop", {}).get("name", ""),
+                "arrival_stop": transit.get("arrival_stop", {}).get("name", ""),
+                "departure_time": _transit_time(transit.get("departure_time")),
+                "arrival_time": _transit_time(transit.get("arrival_time")),
+                "num_stops": transit.get("num_stops", 0),
+                "vehicle_name": transit.get("line", {}).get("vehicle", {}).get("name", ""),
             })
         alignment = _precision_alignment_step(steps, leg, precision_coord)
         if alignment:
@@ -144,6 +167,12 @@ def plan_mission(init_loc: str, stops: list[dict], *, start_time: datetime | Non
         if alignment:
             distance_meters += alignment["distance_meters"]
         arrival = departure + timedelta(seconds=duration)
+        google_arrival = _transit_time(leg.get("arrival_time"))
+        if google_arrival:
+            arrival = datetime.fromisoformat(google_arrival).astimezone(departure.tzinfo)
+            if alignment:
+                arrival += timedelta(seconds=alignment["duration_seconds"])
+            duration = max(1, math.ceil((arrival - departure).total_seconds()))
         routes.append({
             "origin": origin,
             "destination": destination,
@@ -165,3 +194,9 @@ def plan_mission(init_loc: str, stops: list[dict], *, start_time: datetime | Non
         "initial_google_eta": routes[-1]["arrival_at"],
         "routes": routes,
     }
+
+
+def _transit_time(value: dict | None) -> str:
+    if not value or "value" not in value:
+        return ""
+    return _utc_iso(datetime.fromtimestamp(value["value"], timezone.utc))

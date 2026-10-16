@@ -14,6 +14,13 @@ let nextFrameAt = 0;
 let movementTimer = null;
 let fetchInterval = 1000;
 let lastErrorMessage = "";
+let movementInFlight = false;
+let generation = 0;
+const MAX_RECORDS = 20000;
+let historyOffsets = [0];
+let historyPage = 0;
+let historyHasMore = false;
+let historyLoading = false;
 
 function syncPlaybackUi() {
     const slider = $("timeSlider");
@@ -46,6 +53,7 @@ function resetRecords() {
     streamId = null;
     playbackIndex = 0;
     syncPlaybackUi();
+    $("playback-time").textContent = "--:--:--";
     renderRecords([]);
 }
 
@@ -116,10 +124,12 @@ export function togglePlay() {
 }
 
 async function loadMovementPage({ append, live }) {
+    const version = generation;
     const page = await fetchJson(
         `${dataUrls.movements}?offset=${append ? cursor : 0}&limit=500`,
         "Unable to load movement data.",
     );
+    if (version !== generation) return { records: [], has_more: false };
     if (streamId && page.stream_id !== streamId) {
         // A new mission started; this page was fetched with the previous
         // stream's offset, so discard it and restart the cursor from zero.
@@ -136,7 +146,15 @@ async function loadMovementPage({ append, live }) {
         renderRecords(allRecords);
     } else if (records.length) {
         allRecords.push(...records);
-        renderRecordsIncremental(records, allRecords.length);
+        if (allRecords.length > MAX_RECORDS) {
+            const removed = Math.min(5000, allRecords.length);
+            allRecords.splice(0, removed);
+            playbackIndex = Math.max(0, playbackIndex - removed);
+            stopPlayback();
+            renderRecords(allRecords);
+        } else {
+            renderRecordsIncremental(records, allRecords.length);
+        }
         // Only jump to the newest fix while the user is actually following
         // live; otherwise every poll would yank them out of playback.
         if (live && followingLive) playbackIndex = allRecords.length - 1;
@@ -152,11 +170,12 @@ function scheduleMovementFetch(delay = fetchInterval) {
 }
 
 export async function fetchLiveMovements() {
-    if (isHistoryPage) return;
+    if (isHistoryPage || movementInFlight) return;
     if (document.hidden) {
         scheduleMovementFetch(10000);
         return;
     }
+    movementInFlight = true;
     try {
         const page = await loadMovementPage({ append: true, live: true });
         fetchInterval = page.records?.length ? 1000 : Math.min(fetchInterval * 1.3, 5000);
@@ -169,6 +188,8 @@ export async function fetchLiveMovements() {
         lastErrorMessage = message;
         fetchInterval = Math.min(fetchInterval * 2, 30000);
         scheduleMovementFetch(fetchInterval);
+    } finally {
+        movementInFlight = false;
     }
 }
 
@@ -177,21 +198,50 @@ export async function loadInitialMovements() {
         await fetchLiveMovements();
         return;
     }
+    if (historyLoading) return;
+    historyLoading = true;
+    $("historyEarlier").disabled = true;
+    $("historyLater").disabled = true;
     resetRecords();
-    let page = await loadMovementPage({ append: false, live: false });
-    while (page.has_more) {
-        page = await loadMovementPage({ append: true, live: false });
-        await new Promise((resolve) => window.setTimeout(resolve, 0));
+    cursor = historyOffsets[historyPage];
+    try {
+        let page = await loadMovementPage({ append: true, live: false });
+        while (page.has_more && allRecords.length < MAX_RECORDS) {
+            page = await loadMovementPage({ append: true, live: false });
+            await new Promise((resolve) => window.setTimeout(resolve, 0));
+        }
+        historyHasMore = page.has_more;
+        historyOffsets[historyPage + 1] = cursor;
+        playbackIndex = 0;
+        updatePlaybackState();
+    } finally {
+        historyLoading = false;
+        $("historyEarlier").disabled = historyPage === 0;
+        $("historyLater").disabled = !historyHasMore;
     }
 }
 
 export function clearPlaybackData() {
+    // Keep the stream cursor: clearing the view must not refetch old traces.
+    const savedCursor = cursor;
+    const savedStream = streamId;
+    generation += 1;
     resetRecords();
+    cursor = savedCursor;
+    streamId = savedStream;
 }
 
 export function bindPlaybackControls() {
     $("playPauseBtn").addEventListener("click", togglePlay);
     if (isHistoryPage) {
+        for (const [id, delta] of [["historyEarlier", -1], ["historyLater", 1]]) {
+            $(id).addEventListener("click", async () => {
+                if (historyLoading) return;
+                historyPage = Math.max(0, historyPage + delta);
+                try { await loadInitialMovements(); }
+                catch (error) { showToast(error.message, "error"); }
+            });
+        }
         $("liveBtn").textContent = "HISTORY";
         $("liveBtn").disabled = true;
         $("liveBtn").classList.remove("active");

@@ -99,15 +99,16 @@ def main() -> int:
     # that was killed; taking it over avoids a 30-second wait on every restart.
     db.clear_worker_lease()
 
-    threading.Thread(target=server.run, name="web", daemon=True).start()
-    # Flush explicitly: stdout is block-buffered whenever it is not a terminal,
-    # which would otherwise hide the banner in VS Code's debug console.
-    print(banner(host, port), flush=True)
+    def start_web() -> None:
+        # Start accepting tasks only after orphan recovery; otherwise a fresh
+        # submission can be mistaken for a mission left behind by a restart.
+        threading.Thread(target=server.run, name="web", daemon=True).start()
+        print(banner(host, port), flush=True)
 
     try:
         # The worker owns the main thread so its existing SIGINT/SIGTERM
         # handlers drive shutdown for the whole process.
-        run_worker()
+        run_worker(on_ready=start_web)
     finally:
         server.close()
         print("[SYSTEM] Mock GPS Follow Live Nav stopped.", flush=True)

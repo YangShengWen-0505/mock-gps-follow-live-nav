@@ -103,7 +103,9 @@ def test_mission_initialization_failure_is_saved(tmp_path, monkeypatch):
         {"init_loc": "25,121", "stops": [{"name": "A"}]}, _plan()
     )
     mission = db.claim_next("worker")
-    monkeypatch.setattr(logger, "init_task_logs", lambda _mission_id: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        logger, "init_task_logs", lambda _mission_id, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
     navigation.execute_mission(mission, threading.Event())
     stored = db.get_mission(mission_id)
     assert stored["status"] == "failed"
@@ -180,7 +182,7 @@ def test_replan_uses_scheduled_departure_as_plan_start_time(tmp_path, monkeypatc
 
     captured = {}
 
-    def fake_plan(origin, remaining, *, start_time=None):
+    def fake_plan(origin, remaining, *, start_time=None, **_kwargs):
         captured["origin"] = origin
         captured["remaining"] = remaining
         captured["start_time"] = start_time
@@ -193,7 +195,7 @@ def test_replan_uses_scheduled_departure_as_plan_start_time(tmp_path, monkeypatc
     monkeypatch.setattr(navigation, "move_step", lambda *_a, **_k: True)
     monkeypatch.setattr(navigation, "_wait_until", lambda *_a, **_k: True)
     monkeypatch.setattr(navigation, "send_position", lambda *_a, **_k: None)
-    monkeypatch.setattr(navigation.logger, "init_task_logs", lambda *_a: {"session_dir": None})
+    monkeypatch.setattr(navigation.logger, "init_task_logs", lambda *_a, **_k: {"session_dir": None})
     monkeypatch.setattr(navigation.logger, "write_mission_snapshot", lambda *_a: None)
 
     shutdown = threading.Event()

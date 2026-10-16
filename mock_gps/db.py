@@ -120,6 +120,42 @@ def init_db() -> None:
             );
             """
         )
+        for row in connection.execute("SELECT id,log_session,created_at FROM missions"):
+            stable = session_key(row["log_session"]) if row["log_session"] else (
+                f"{datetime.fromisoformat(row['created_at']):%Y-%m-%d/%H-%M-%S}-{row['id']}"
+            )
+            if stable != row["log_session"]:
+                connection.execute("UPDATE missions SET log_session=? WHERE id=?", (stable, row["id"]))
+
+
+def session_key(value: str) -> str:
+    return "/".join(str(value).replace("\\", "/").rstrip("/").split("/")[-2:])
+
+
+def _select_fields(include_plan: bool, include_payload: bool) -> str:
+    excluded = set()
+    if not include_plan:
+        excluded.add("plan_json")
+    if not include_payload:
+        excluded.add("payload_json")
+    return ",".join(sorted(MISSION_COLUMNS - excluded))
+
+
+def history_missions(limit: int = 100, offset: int = 0) -> list[dict]:
+    with connect() as connection:
+        rows = connection.execute(
+            f"SELECT {_select_fields(False, True)} FROM missions ORDER BY log_session DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return [_decode(row, include_plan=False) for row in rows]
+
+
+def active_mission_ids() -> list[int]:
+    with connect() as connection:
+        return [row[0] for row in connection.execute(
+            "SELECT id FROM missions WHERE status IN ('planning','queued','running','degraded') "
+            "OR is_holding_final_position=1"
+        )]
 
 
 def _interrupt_active_missions(connection: sqlite3.Connection, reason: str) -> int:
@@ -128,9 +164,13 @@ def _interrupt_active_missions(connection: sqlite3.Connection, reason: str) -> i
            SET status='interrupted', finished_at=COALESCE(finished_at, ?),
                cancel_requested=1, worker_id=NULL, is_holding_final_position=0,
                phone_status='standby', last_error=COALESCE(last_error, ?)
-           WHERE status IN ('planning','queued','running','degraded')
-              OR is_holding_final_position=1""",
+           WHERE status IN ('planning','queued','running','degraded')""",
         (utc_now(), reason),
+    )
+    connection.execute(
+        """UPDATE missions SET is_holding_final_position=0, worker_id=NULL,
+           cancel_requested=1, phone_status='standby'
+           WHERE status='completed' AND is_holding_final_position=1"""
     )
     return max(0, cursor.rowcount)
 
@@ -176,8 +216,8 @@ def _decode(
     if row is None:
         return None
     result = dict(row)
-    payload_json = result.pop("payload_json")
-    plan_json = result.pop("plan_json")
+    payload_json = result.pop("payload_json", "{}")
+    plan_json = result.pop("plan_json", "{}")
     if include_payload:
         result["payload"] = json.loads(payload_json)
     if include_plan:
@@ -230,6 +270,10 @@ def create_mission(payload: dict, plan: dict | None = None, *, p2p_target: str =
         if not plan:
             connection.execute("UPDATE missions SET route_revision=0 WHERE id=?", (cursor.lastrowid,))
         mission_id = int(cursor.lastrowid)
+        from mock_gps import config
+        stamp = config.local_now()
+        session_id = f"{stamp:%Y-%m-%d}/{stamp:%H-%M-%S}-{mission_id}"
+        connection.execute("UPDATE missions SET log_session=? WHERE id=?", (session_id, mission_id))
         connection.execute("COMMIT")
         return mission_id
 
@@ -266,13 +310,15 @@ def get_mission(
     include_payload: bool = True,
 ) -> dict[str, Any] | None:
     with connect() as connection:
-        row = connection.execute("SELECT * FROM missions WHERE id=?", (mission_id,)).fetchone()
+        fields = _select_fields(include_plan, include_payload)
+        row = connection.execute(f"SELECT {fields} FROM missions WHERE id=?", (mission_id,)).fetchone()
         return _decode(row, include_plan=include_plan, include_payload=include_payload)
 
 
 def latest_mission(*, include_plan: bool = True, include_payload: bool = True) -> dict[str, Any] | None:
     with connect() as connection:
-        row = connection.execute("SELECT * FROM missions ORDER BY id DESC LIMIT 1").fetchone()
+        fields = _select_fields(include_plan, include_payload)
+        row = connection.execute(f"SELECT {fields} FROM missions ORDER BY id DESC LIMIT 1").fetchone()
         return _decode(row, include_plan=include_plan, include_payload=include_payload)
 
 
@@ -315,9 +361,20 @@ def mission_by_log_session(
 ) -> dict[str, Any] | None:
     with connect() as connection:
         row = connection.execute(
-            "SELECT * FROM missions WHERE log_session=? LIMIT 1", (log_session,)
+            f"SELECT {_select_fields(include_plan, include_payload)} FROM missions WHERE log_session=? LIMIT 1",
+            (session_key(log_session),)
         ).fetchone()
         return _decode(row, include_plan=include_plan, include_payload=include_payload)
+
+
+def phone_delivery_allowed(mission_id: int) -> bool:
+    with connect() as connection:
+        row = connection.execute(
+            """SELECT 1 FROM missions WHERE id=? AND cancel_requested=0
+               AND (status IN ('running','degraded') OR (status='completed' AND is_holding_final_position=1))""",
+            (mission_id,),
+        ).fetchone()
+    return row is not None
 
 
 def is_cancel_requested(mission_id: int) -> bool:
@@ -342,6 +399,8 @@ def update_mission(mission_id: int, **values: Any) -> None:
     unknown = set(values) - allowed
     if unknown:
         raise ValueError(f"Unsupported mission fields: {sorted(unknown)}")
+    if values.get("log_session"):
+        values["log_session"] = session_key(values["log_session"])
     if "plan_json" in values and not isinstance(values["plan_json"], str):
         values["plan_json"] = json.dumps(values["plan_json"], ensure_ascii=False)
     assignments = ", ".join(f"{key}=?" for key in values)

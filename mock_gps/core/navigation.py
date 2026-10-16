@@ -5,6 +5,7 @@ import signal
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -12,11 +13,14 @@ from typing import Any
 import requests
 
 from mock_gps import config, db, history, logger
-from mock_gps.core.planner import plan_mission, scheduled_departure
+from mock_gps.core.planner import PlanningCancelled, plan_mission, scheduled_departure
 
 PHONE_URL = f"http://{config.PHONE_TAILSCALE_IP}:8080/gps" if config.PHONE_TAILSCALE_IP else ""
 _phone_queue: queue.Queue[tuple[int, float, float] | None] = queue.Queue(maxsize=1)
-_phone_worker_started = False
+_phone_thread: threading.Thread | None = None
+_worker_started = False
+_worker_heartbeat = 0.0
+_phone_heartbeat = 0.0
 _phone_worker_lock = threading.Lock()
 _phone_health: dict[int, tuple[str, float]] = {}
 
@@ -47,30 +51,50 @@ def _record_phone_health(mission_id: int, status: str, *, error: str | None = No
 
 
 def _phone_loop() -> None:
-    session = requests.Session()
-    while True:
-        item = _phone_queue.get()
-        if item is None:
-            return
-        mission_id, lat, lng = item
-        if not PHONE_URL:
-            _record_phone_health(mission_id, "standby")
-            continue
-        try:
-            response = session.get(PHONE_URL, params={"lat": lat, "lng": lng}, timeout=0.8)
-            response.raise_for_status()
-            _record_phone_health(mission_id, "ok")
-        except Exception as exc:
-            _record_phone_health(mission_id, "unreachable", error=str(exc))
+    global _phone_heartbeat
+    with requests.Session() as session:
+        while True:
+            _phone_heartbeat = time.monotonic()
+            try:
+                item = _phone_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            if item is None:
+                return
+            mission_id, lat, lng = item
+            try:
+                if not db.phone_delivery_allowed(mission_id):
+                    continue
+                if not PHONE_URL:
+                    _record_phone_health(mission_id, "standby")
+                    continue
+                try:
+                    response = session.get(PHONE_URL, params={"lat": lat, "lng": lng}, timeout=0.8)
+                    response.raise_for_status()
+                    status, error = "ok", None
+                except requests.RequestException as exc:
+                    status, error = "unreachable", str(exc)
+                if db.phone_delivery_allowed(mission_id):
+                    _record_phone_health(mission_id, status, error=error)
+            except Exception as exc:
+                logger.log_sys(f"Phone sender deferred an update: {exc}", "warning")
 
 
 def start_phone_worker() -> None:
-    global _phone_worker_started
+    global _phone_thread
     with _phone_worker_lock:
-        if _phone_worker_started:
+        if _phone_thread and _phone_thread.is_alive():
             return
-        threading.Thread(target=_phone_loop, name="phone-sender", daemon=True).start()
-        _phone_worker_started = True
+        _phone_thread = threading.Thread(target=_phone_loop, name="phone-sender", daemon=True)
+        _phone_thread.start()
+
+
+def worker_health() -> dict:
+    now = time.monotonic()
+    worker_ok = _worker_started and now - _worker_heartbeat < 35
+    phone_ok = bool(_phone_thread and _phone_thread.is_alive() and now - _phone_heartbeat < 35)
+    return {"status": "ok" if worker_ok and phone_ok else "degraded",
+            "worker": worker_ok, "phone_sender": phone_ok}
 
 
 def _queue_phone(mission_id: int, lat: float, lng: float) -> None:
@@ -171,6 +195,21 @@ def send_position(
         db.update_mission(ctx.mission_id, last_lat=lat, last_lng=lng)
         ctx.last_position_write = now
     _queue_phone(ctx.mission_id, lat, lng)
+
+
+def persist_position(ctx: MissionContext) -> None:
+    if ctx.last_position:
+        db.update_mission(ctx.mission_id, last_lat=ctx.last_position[0], last_lng=ctx.last_position[1])
+
+
+def _open_mission_logs(mission: dict) -> None:
+    session_id = mission.get("log_session")
+    expected = (logger.LOG_ROOT / session_id).resolve() if session_id else None
+    if expected and logger.current_session_dir and expected == logger.current_session_dir.resolve():
+        return
+    status = logger.init_task_logs(mission["id"], session_id=session_id)
+    db.update_mission(mission["id"], log_session=status["session_dir"])
+    history.persist_mission(mission["id"])
 
 
 def _route_segments(points: list[list[float]]) -> tuple[list[float], float]:
@@ -293,9 +332,7 @@ def _route_delay_seconds(route: dict, actual_arrival: datetime) -> float:
 def execute_mission(mission: dict[str, Any], worker_shutdown: threading.Event) -> None:
     ctx = MissionContext(mission["id"], worker_shutdown)
     try:
-        log_status = logger.init_task_logs(mission["id"])
-        db.update_mission(mission["id"], log_session=log_status["session_dir"])
-        logger.write_mission_snapshot({"payload": mission["payload"], "plan": mission["plan"]})
+        _open_mission_logs(mission)
         plan = mission["plan"]
         routes = plan["routes"]
         init_lat, init_lng = [
@@ -306,16 +343,21 @@ def execute_mission(mission: dict[str, Any], worker_shutdown: threading.Event) -
         while route_index < len(routes) and ctx.should_continue():
             route = routes[route_index]
             db.update_mission(ctx.mission_id, current_target=route["destination"])
-            if not _wait_until(ctx, route["departure_at"], "Scheduled Wait"):
+            if route_index == 0 and not _wait_until(ctx, route["departure_at"], "Scheduled Wait"):
                 break
             step_deadline = time.monotonic()
             for step in route["steps"]:
+                if step.get("departure_time"):
+                    if not _wait_until(ctx, step["departure_time"], "Transit Wait"):
+                        break
+                    step_deadline = time.monotonic()
                 step_deadline += max(1, step["duration_seconds"])
                 if not move_step(ctx, step, step_deadline):
                     break
             if not ctx.should_continue():
                 break
 
+            persist_position(ctx)
             route_index += 1
             actual_arrival = datetime.now(timezone.utc)
             route_delay = _route_delay_seconds(route, actual_arrival)
@@ -328,18 +370,25 @@ def execute_mission(mission: dict[str, Any], worker_shutdown: threading.Event) -
                 schedule_debt_seconds=projected_debt,
             )
 
-            if route_delay > 60.0 and route_index < len(routes):
+            current_stop = mission["payload"]["stops"][route_index - 1]
+            resume_at = scheduled_departure(actual_arrival.astimezone(config.TIMEZONE), current_stop)
+            if not _wait_until(ctx, resume_at.isoformat(), "Stop Wait"):
+                break
+            history.persist_mission(ctx.mission_id)
+            # A missed scheduled departure can move to tomorrow even if the
+            # arrival was only seconds late. Replan that case as well.
+            shifted = route_index < len(routes) and abs((
+                resume_at - datetime.fromisoformat(routes[route_index]["departure_at"])
+            ).total_seconds()) > 60
+            if (route_delay > 60.0 or shifted) and route_index < len(routes):
                 latest = db.get_mission(ctx.mission_id, include_plan=False)
                 remaining_stops = mission["payload"]["stops"][route_index:]
-                origin = f"{latest['last_lat']},{latest['last_lng']}"
-                # The stop we just reached still owns its scheduled departure;
-                # replanning from "now" would silently drop its wait_time.
-                current_stop = mission["payload"]["stops"][route_index - 1]
-                resume_at = scheduled_departure(
-                    actual_arrival.astimezone(config.TIMEZONE), current_stop
-                )
+                position = ctx.last_position or (latest["last_lat"], latest["last_lng"])
+                origin = f"{position[0]},{position[1]}"
                 try:
-                    replanned = plan_mission(origin, remaining_stops, start_time=resume_at)
+                    replanned = plan_mission(
+                        origin, remaining_stops, start_time=resume_at, should_continue=ctx.should_continue,
+                    )
                     routes = routes[:route_index] + replanned["routes"]
                     plan["routes"] = routes
                     latest_eta = replanned["initial_google_eta"]
@@ -357,6 +406,10 @@ def execute_mission(mission: dict[str, Any], worker_shutdown: threading.Event) -
                         status="running",
                         last_error=None,
                     )
+                    history.persist_mission(ctx.mission_id)
+                except PlanningCancelled:
+                    ctx.cancel_event.set()
+                    break
                 except Exception as exc:
                     db.update_mission(
                         ctx.mission_id,
@@ -375,7 +428,10 @@ def execute_mission(mission: dict[str, Any], worker_shutdown: threading.Event) -
             )
             return
 
-        final = db.get_mission(ctx.mission_id, include_plan=False, include_payload=False)
+        persist_position(ctx)
+        final_position = ctx.last_position
+        if final_position is None:
+            raise RuntimeError("Mission completed without a position")
         db.update_mission(
             ctx.mission_id,
             status="completed",
@@ -384,15 +440,15 @@ def execute_mission(mission: dict[str, Any], worker_shutdown: threading.Event) -
             is_holding_final_position=1,
         )
         logger.log_route("Mission complete. Holding final position.")
-        send_position(ctx, final["last_lat"], final["last_lng"], "Mission Complete")
+        history.persist_mission(ctx.mission_id)
+        send_position(ctx, *final_position, "Mission Complete")
         next_heartbeat = time.monotonic() + 60.0
         while ctx.should_continue():
             now = time.monotonic()
             record = now >= next_heartbeat
             send_position(
                 ctx,
-                final["last_lat"],
-                final["last_lng"],
+                *final_position,
                 "Completed Heartbeat",
                 record=record,
             )
@@ -426,6 +482,11 @@ def execute_mission(mission: dict[str, Any], worker_shutdown: threading.Event) -
             except queue.Empty:
                 break
         _phone_health.pop(ctx.mission_id, None)
+        try:
+            persist_position(ctx)
+            history.persist_mission(ctx.mission_id)
+        finally:
+            logger.close_task_logs()
 
 
 def _plan_and_execute_mission(
@@ -439,10 +500,15 @@ def _plan_and_execute_mission(
             finished_at=db.utc_now(),
             worker_id=None,
         )
+        history.persist_mission(mission_id)
         return
     try:
+        _open_mission_logs(mission)
         payload = mission["payload"]
-        plan = plan_mission(payload["init_loc"], payload["stops"])
+        plan = plan_mission(
+            payload["init_loc"], payload["stops"],
+            should_continue=lambda: not worker_shutdown.is_set() and not db.is_cancel_requested(mission_id),
+        )
         if db.is_cancel_requested(mission_id) or worker_shutdown.is_set():
             db.update_mission(
                 mission_id,
@@ -465,6 +531,9 @@ def _plan_and_execute_mission(
         planned = db.get_mission(mission_id)
         if planned:
             execute_mission(planned, worker_shutdown)
+    except PlanningCancelled:
+        db.update_mission(mission_id, status="interrupted" if worker_shutdown.is_set() else "stopped",
+                          finished_at=db.utc_now(), worker_id=None)
     except Exception as exc:
         logger.log_sys(f"Mission planning failed: {exc}", "error")
         db.update_mission(
@@ -475,6 +544,12 @@ def _plan_and_execute_mission(
             worker_id=None,
             is_holding_final_position=0,
         )
+
+    finally:
+        try:
+            history.persist_mission(mission_id)
+        finally:
+            logger.close_task_logs()
 
 
 def _install_shutdown_handlers(worker_shutdown: threading.Event) -> dict[int, Any]:
@@ -491,7 +566,23 @@ def _install_shutdown_handlers(worker_shutdown: threading.Event) -> dict[int, An
     return previous_handlers
 
 
-def run_worker(poll_interval: float = 0.5) -> None:
+def _renew_lease(worker_id: str, worker_shutdown: threading.Event) -> None:
+    global _worker_heartbeat, _worker_started
+    while not worker_shutdown.wait(10.0):
+        try:
+            if not db.renew_worker(worker_id, db.utc_epoch_ms() + 30_000):
+                raise RuntimeError("Worker lease was lost")
+            _worker_heartbeat = time.monotonic()
+            start_phone_worker()
+        except Exception as exc:
+            logger.log_sys(f"Worker lease renewal failed: {exc}", "error")
+            _worker_started = False
+            worker_shutdown.set()
+            return
+
+
+def run_worker(poll_interval: float = 0.5, *, on_ready: Callable[[], None] | None = None) -> None:
+    global _worker_started, _worker_heartbeat
     # create_app() already set the logging handlers up for this process; the
     # worker shares them because start_local.py runs both in one process.
     if config.TIMEZONE_WARNING:
@@ -507,20 +598,18 @@ def run_worker(poll_interval: float = 0.5) -> None:
 
     # The lease is ours, so no other worker can legitimately be executing a
     # mission. Anything still marked active belongs to a run that was killed.
+    orphaned_ids = db.active_mission_ids()
     reclaimed = db.interrupt_active_missions("Worker restarted; the previous run did not finish")
+    for mission_id in orphaned_ids:
+        history.persist_mission(mission_id)
     if reclaimed:
         logger.log_sys(f"Reclaimed {reclaimed} orphaned mission(s) on worker startup", "warning")
 
+    _worker_started = True
+    _worker_heartbeat = time.monotonic()
     previous_handlers = _install_shutdown_handlers(worker_shutdown)
 
-    def renew_lease() -> None:
-        while not worker_shutdown.wait(10.0):
-            if not db.renew_worker(worker_id, db.utc_epoch_ms() + 30_000):
-                logger.log_sys("Worker lease was lost; shutting down worker.", "error")
-                worker_shutdown.set()
-                return
-
-    threading.Thread(target=renew_lease, name="worker-lease", daemon=True).start()
+    threading.Thread(target=_renew_lease, args=(worker_id, worker_shutdown), name="worker-lease", daemon=True).start()
 
     def maintain_history() -> None:
         while not worker_shutdown.is_set():
@@ -535,6 +624,8 @@ def run_worker(poll_interval: float = 0.5) -> None:
     start_phone_worker()
     logger.log_sys(f"Mission worker started: {worker_id}")
     try:
+        if on_ready:
+            on_ready()
         while not worker_shutdown.is_set():
             mission = db.claim_next(worker_id)
             if mission:
@@ -545,6 +636,16 @@ def run_worker(poll_interval: float = 0.5) -> None:
             else:
                 worker_shutdown.wait(poll_interval)
     finally:
-        db.release_worker(worker_id)
-        for signum, previous in previous_handlers.items():
-            signal.signal(signum, previous)
+        worker_shutdown.set()
+        _worker_started = False
+        try:
+            pending_ids = db.active_mission_ids()
+            db.interrupt_active_missions("Application stopped")
+            for mission_id in pending_ids:
+                history.persist_mission(mission_id)
+        finally:
+            try:
+                db.release_worker(worker_id)
+            finally:
+                for signum, previous in previous_handlers.items():
+                    signal.signal(signum, previous)

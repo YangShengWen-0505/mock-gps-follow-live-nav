@@ -57,7 +57,7 @@ def _formatter(with_date: bool = False) -> logging.Formatter:
 
 def _file_handler(path: Path, level: int, with_date: bool = False) -> logging.FileHandler:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(path, encoding="utf-8")
+    handler = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
     handler.setLevel(level)
     handler.setFormatter(_formatter(with_date=with_date))
     return handler
@@ -132,7 +132,7 @@ def _close_csv() -> None:
                 _csv_writer = None
 
 
-def init_task_logs(mission_id: int | None = None) -> dict[str, str | None]:
+def init_task_logs(mission_id: int | None = None, *, session_id: str | None = None) -> dict[str, str | None]:
     global current_session_dir, current_csv_file
     global _csv_file_handle, _csv_writer, _movement_sequence
 
@@ -140,14 +140,18 @@ def init_task_logs(mission_id: int | None = None) -> dict[str, str | None]:
     now = config.local_now()
     suffix = f"-{mission_id}" if mission_id is not None else ""
     current_session_dir = LOG_ROOT / now.strftime("%Y-%m-%d") / f"{now.strftime('%H-%M-%S')}{suffix}"
+    if session_id:
+        current_session_dir = LOG_ROOT / session_id
     current_session_dir.mkdir(parents=True, exist_ok=True)
     current_csv_file = current_session_dir / "movement.csv"
     _movement_sequence = 0
+    new_file = not current_csv_file.exists() or current_csv_file.stat().st_size == 0
 
     with _csv_lock:
-        _csv_file_handle = current_csv_file.open(mode="w", newline="", encoding="utf-8")
+        _csv_file_handle = current_csv_file.open(mode="a", newline="", encoding="utf-8")
         _csv_writer = csv.writer(_csv_file_handle)
-        _csv_writer.writerow(MOVEMENT_FIELDS)
+        if new_file:
+            _csv_writer.writerow(MOVEMENT_FIELDS)
         _csv_file_handle.flush()
 
     all_handler = _file_handler(current_session_dir / "all.log", logging.DEBUG)
@@ -162,6 +166,18 @@ def init_task_logs(mission_id: int | None = None) -> dict[str, str | None]:
 
     log_sys(f"Task log session created: {current_session_dir}")
     return get_log_status()
+
+
+def close_task_logs() -> None:
+    global current_session_dir, current_csv_file
+    _close_csv()
+    with _handler_lock:
+        handlers = [_process_handler] if _process_handler else []
+        _attach_handlers(sys_logger, [*handlers, _terminal_handler()])
+        _attach_handlers(route_logger, [*handlers, _terminal_handler()])
+        _attach_handlers(security_logger, handlers)
+        current_session_dir = None
+        current_csv_file = None
 
 
 def get_log_status() -> dict[str, str | None]:

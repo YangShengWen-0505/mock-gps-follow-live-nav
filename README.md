@@ -4,7 +4,7 @@ GPS Route Simulation and Live Navigation System
 
 Mock GPS Follow Live Nav is a local testing system that simulates GPS routes and monitors live navigation progress across a Windows PC, an Android device, and a private Tailscale network.
 
-The project combines a Python and Flask web application, a background mission worker, SQLite persistence, the Google Maps Directions API, MacroDroid, and GPS JoyStick. It is designed to help developers test route planning, asynchronous task execution, real-time monitoring, Android integration, and historical mission analysis in a controlled environment.
+The project combines a Python and Flask web application, a background mission worker, SQLite persistence, Google Maps Directions API, MacroDroid, and GPS JoyStick. It is designed to help developers test route planning, asynchronous task execution, real-time monitoring, Android integration, and historical mission analysis in a controlled environment.
 
 ## Project overview
 
@@ -12,7 +12,7 @@ The system accepts a route task, plans the complete journey with the Google Maps
 
 The main workflow is:
 
-1. Submit a route task through the web dashboard, API, or MacroDroid.
+1. Submit a route task through the API or MacroDroid (the dashboard monitors tasks).
 2. Plan the route asynchronously with the mission worker.
 3. Forward simulated coordinates to the Android device through Tailscale and MacroDroid.
 4. Monitor task status, ETA, route progress, logs, and phone health.
@@ -28,7 +28,7 @@ This documentation is written for Windows and PowerShell. The command paths use 
 
 ## Key features
 
-- Plans walking, transit, and motorcycle routes with Google Maps Directions API.
+- Plans walking and transit routes with Directions API.
 - Runs the Flask web application and mission worker through one local entry point.
 - Sends GPS coordinates from the PC to an Android test device through Tailscale and MacroDroid.
 - Stores mission state, logs, movement records, and historical sessions in SQLite.
@@ -50,9 +50,9 @@ The sections below provide detailed setup and technical documentation, including
 
 - Task control: use /start_task to start a task and /stop_task to stop the server-side task.
 - GPS forwarding: send latitude and longitude to the Android MacroDroid /gps endpoint. Mobile HTTP delivery is decoupled from movement logging.
-- Route planning: use Google Maps Directions API to obtain walking, transit, and motorcycle routes.
+- Route planning: use Directions API for walking/transit.
 - Navigation history: preserve the travel mode, vehicle type, route, stops, distance, and duration returned by each Google Directions request.
-- Travel modes: support walking, transit, and motorcycle.
+- Travel modes: support walking and transit.
 - Public transit: use transit_type to select AUTO, MRT, or BUS.
 - Position persistence: keep the last simulated position after a task finishes until the task is stopped.
 - Task history: create an independent log session and movement.csv file for every task.
@@ -82,7 +82,7 @@ flowchart LR
 | Item | Purpose |
 | --- | --- |
 | Windows PC | Runs the dashboard and mission worker |
-| Python 3.10 or later | Creates the virtual environment; CI validates the project with Python 3.10 |
+| Python 3.10 or later | Creates the virtual environment; CI validates the project with Python 3.10 and 3.12 |
 | Google Cloud account | Provides billing and the Directions API |
 | Android phone | Runs MacroDroid and GPS JoyStick |
 | MacroDroid | Provides the HTTP server and Send Intent actions; some features require Pro |
@@ -104,9 +104,9 @@ The complete setup has eight stages:
 
 1. Open Google Cloud Console and create a project.
 2. Enable billing for the project. Directions API requires a billing account.
-3. Open APIs and Services, then Library, and enable Directions API. This project only calls this API; Geocoding, Places, and Maps JavaScript API are not required.
+3. Open APIs and Services, then Library, and enable Directions API. Geocoding, Places, and Maps JavaScript API are not required.
 4. Open Credentials, select Create credentials, choose API key, and copy the generated key.
-5. Open the key edit page. Under API restrictions, select Restrict key and allow only Directions API. Because the key is called by the PC backend, you may also add an IP restriction if the PC has a fixed public IP address.
+5. Open the key edit page. Under API restrictions, select Restrict key and allow Directions API. Because the key is called by the PC backend, you may also add an IP restriction if the PC has a fixed public IP address.
 
 Put the key in GOOGLE_MAPS_API_KEY in .env during Step 3.
 
@@ -268,6 +268,8 @@ MacroDroid HTTP Server trigger:
 - Query parameters: lat and lng
 - Port: 8080
 
+After importing, enable Move GPS and verify the HTTP server port on the phone. The category export does not contain a per-trigger port setting. Set PHONE_TAILSCALE_IP in the PC .env to the current phone Tailscale IP and restart the PC service after changing it. This is different from g_server_url, which points from the phone to the PC. Keep both devices connected to Tailscale and allow MacroDroid and Tailscale to run in the background. A ConnectTimeoutError to the phone on port 8080 means the connection was not established; it does not indicate a JSON validation error.
+
 Send Intent action:
 
 | Field | Value |
@@ -312,7 +314,7 @@ Stop the application with Ctrl+C or the VS Code stop button. The entire process 
 
 If the process is forcefully terminated, the worker reclaims leftover running tasks after obtaining its lease, changes them to interrupted, and writes a log entry such as Reclaimed N orphaned mission(s) on worker startup.
 
-After a restart, the dashboard returns to IDLE and does not display the interrupted task on the live map. The complete execution record remains available on the history page. The task form keeps the previously submitted stops so that the task can be resubmitted easily.
+After a restart, the dashboard returns to IDLE and does not display the interrupted task on the live map. The complete execution record remains available on the history page. The read-only Schedule panel keeps the previously submitted stops for reference; resubmit using MacroDroid or the API.
 
 Tasks with completed, stopped, aborted, or failed status are not removed during restart and remain visible as records of user-triggered outcomes.
 
@@ -385,7 +387,7 @@ A successful response is 202 Accepted. The task first enters planning, and the w
 | init_loc | Yes | Initial coordinate in lat,lng format |
 | stops | Yes | Array of task stops; at least 1 and at most 50 stops |
 | stops[].name | Yes | Place name or address recognized by Google Maps |
-| stops[].mode | Yes | walking, transit, or motorcycle; motorcycle maps to Google's two_wheeler mode |
+| stops[].mode | Yes | walking or transit |
 | stops[].transit_type | No | AUTO, MRT, BUS, or an empty string; used only with transit |
 | stops[].wait_time | No | Local HH:MM time. The task waits until this time after arriving at the stop |
 | stops[].skip_if_late | No | If the arrival time has passed wait_time, true departs immediately and false waits until the same time on the next day |
@@ -415,7 +417,7 @@ The dashboard displays:
 - System, route, error, and security logs
 - Task history list
 
-Selecting a history session opens /history/{date}/{session} in a new tab. The live dashboard continues its normal polling and does not switch modes or stop. All data buttons on a history page read only the session identified by the URL. If a historical data source is missing, the page does not fall back to live data. The CSV button displays a paginated table instead of downloading the original file.
+Selecting a history session opens /history/{date}/{session} in a new tab. The live dashboard continues its normal polling and does not switch modes or stop. Status, navigation, CSV and log buttons read the selected session. The explicitly labeled LIVE Schedule button displays the latest submitted schedule. If a historical data source is missing, the page does not fall back to live data. The CSV button displays a paginated table instead of downloading the original file.
 
 The web page does not display computer hardware information.
 
@@ -477,7 +479,7 @@ Sequence,Timestamp,Latitude,Longitude,Action,Note,TimestampISO,DeltaSeconds,Dist
 
 During movement, CSV records use real system seconds. After a task completes, the phone still receives the final coordinate every second, but the CSV writes only a completion record and one heartbeat every 60 seconds.
 
-Sessions older than 30 days are deleted from their original directories after ZIP integrity is verified. The ZIP files are stored in logs/archives/ and can be extracted by the dashboard for playback.
+Closed sessions older than 30 days are removed from their original directories only after ZIP integrity and source contents match. Active sessions and open logs are excluded. The ZIP files are stored in logs/archives/ and can be extracted by the dashboard for playback.
 
 ## settings.json
 
@@ -603,3 +605,24 @@ This project is licensed under the MIT License. See LICENSE for the full text.
 Yang Sheng-Wen
 
 https://github.com/YangShengWen-0505
+
+## Reliability and data limits
+
+- Planning checks cancellation between requests and has a five-minute overall budget. An in-flight HTTP request must finish or time out before cancellation is observed; Directions SDK retries can extend that individual request.
+- Stops resolve wait_time against actual arrival, including the final stop. Transit boarding waits use Google's returned departure timestamps; a missed service is not a real-world boarding guarantee.
+- GET /health returns 503 until the worker and phone sender are healthy, and 200 while their heartbeats are current. This checks the sender process, not whether the phone acknowledged a coordinate; phone reachability is in system_status.
+- History includes failed planning and cancelled tasks, uses portable session IDs, and has 100-entry pages. Existing absolute session paths are normalized at startup. Keep SQLite and logs together when backing up; current-format mission.json snapshots also provide status and route fallback.
+- Live playback retains at most 20,000 recent records in memory (trimming a 5,000-record batch when full). History playback has Earlier records / Later records windows of up to 20,000 records. Full data remains in movement.csv. Point markers are capped at 5,000.
+- Clear traces clears the current view while retaining its stream cursor. Subsequent fixes continue from that point; reload to restore older data.
+- Each task log rotates at 5 MiB with five backups. The web log viewer shows only the latest 256 KiB of the current log; rotated files are retained in the session and archive.
+- Five failed credential attempts block further attempts from that source for the remainder of a five-minute window, including correct guesses. Responses include Retry-After. Existing authenticated sessions remain usable.
+- MacroDroid's example uses a flat typed StopData dictionary for each stop and native [lvjson serialization](https://macrodroidforum.com/wiki/index.php?title=Variables), requiring MacroDroid 5.54 or later. Each serialized stop is appended inside the loop to the JSON_Body stops array; it does not create nested dictionary containers. The initial location must be a latitude,longitude coordinate. Import the updated example and verify a multi-stop mission, including names containing quotes or backslashes. Automated payload-expression tests do not replace import and execution testing on Android.
+
+Run backend and frontend regression tests:
+
+~~~powershell
+.venv/Scripts/python -m pytest
+node --experimental-vm-modules --test tests/frontend.test.mjs
+.venv/Scripts/python -m ruff check .
+.venv/Scripts/python -m pip check
+~~~

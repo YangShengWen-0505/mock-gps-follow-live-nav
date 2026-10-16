@@ -38,14 +38,20 @@ export async function openMissionModal() {
     }
 }
 
-export async function openHistoryModal() {
+let historyOffset = 0;
+let historyRequest = 0;
+
+export async function openHistoryModal(offset = 0) {
+    historyOffset = Math.max(0, offset);
+    const version = ++historyRequest;
     const container = $("history-body");
     openModal("history-modal");
     container.innerHTML = '<div class="empty-state">Loading mission history...</div>';
 
     try {
-        const sessions = await fetchJson("/api/history?limit=100", "Unable to load mission history.");
-        if (!sessions.length) {
+        const sessions = await fetchJson(`/api/history?limit=100&offset=${historyOffset}`, "Unable to load mission history.");
+        if (version !== historyRequest) return;
+        if (!sessions.length && historyOffset === 0) {
             renderEmpty(container, "No mission history is available yet.");
             return;
         }
@@ -58,12 +64,20 @@ export async function openHistoryModal() {
                 </div>
                 <div class="history-meta">
                     <div>Updated: ${escapeHtml(formatDateTime(session.updated_at))}</div>
+                    <div>Status: ${escapeHtml(session.status || "Recorded")}</div>
                     <div>Stops: ${session.stops ?? 0} | Size: ${Math.round((session.csv_size || 0) / 1024)} KB</div>
                     <div>Start: ${escapeHtml(session.start || "Unknown")}</div>
                 </div>
             </a>
-        `).join("");
+        `).join("") + `<div class="csv-pager">
+            <button class="action-btn" id="historyPrev" ${historyOffset === 0 ? "disabled" : ""}>Previous</button>
+            <span>Page ${Math.floor(historyOffset / 100) + 1}</span>
+            <button class="action-btn" id="historyNext" ${sessions.length < 100 ? "disabled" : ""}>Next</button>
+        </div>`;
+        $("historyPrev").addEventListener("click", () => openHistoryModal(historyOffset - 100));
+        $("historyNext").addEventListener("click", () => openHistoryModal(historyOffset + 100));
     } catch (error) {
+        if (version !== historyRequest) return;
         renderError(container, error.message || "Unable to load mission history.");
     }
 }

@@ -85,8 +85,8 @@ def test_health_is_public(tmp_path, monkeypatch):
     app = _app(tmp_path, monkeypatch)
     with app.test_client() as client:
         response = client.get("/health")
-    assert response.status_code == 200
-    assert response.get_json() == {"status": "ok"}
+    assert response.status_code == 503
+    assert response.get_json()["status"] == "degraded"
 
 
 def test_security_headers_keep_cross_origin_origin_for_map_tiles(tmp_path, monkeypatch):
@@ -159,11 +159,11 @@ def test_dashboard_login_has_its_own_rate_limit(tmp_path, monkeypatch):
 def test_successful_credentials_clear_their_own_failure_buckets(tmp_path, monkeypatch):
     app = _app(tmp_path, monkeypatch)
     with app.test_client() as client:
-        for index in range(5):
+        for index in range(4):
             assert client.post("/login", data={"api_key": f"wrong-{index}"}).status_code == 401
         assert client.post("/login", data={"api_key": config.API_SECRET_KEY}).status_code == 302
 
-        for index in range(5):
+        for index in range(4):
             assert client.post(
                 "/stop_task", headers={middleware.API_KEY_HEADER: f"wrong-{index}"}
             ).status_code == 401
@@ -371,7 +371,7 @@ def test_vendor_assets_are_cacheable_while_pages_are_not(tmp_path, monkeypatch):
         vendor = client.get("/static/vendor/leaflet/leaflet.js")
         own = client.get("/static/js/api.js")
         page = client.get("/login")
-    assert "immutable" in vendor.headers["Cache-Control"]
+    assert "must-revalidate" in vendor.headers["Cache-Control"]
     assert own.headers["Cache-Control"] == "no-cache"
     assert page.headers["Cache-Control"] == "no-store"
 
@@ -381,12 +381,12 @@ def test_history_listing_accepts_offset(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         history, "list_history_sessions",
-        lambda limit=100, offset=0: captured.update(limit=limit, offset=offset) or [],
+        lambda limit=100, offset=0, **kwargs: captured.update(limit=limit, offset=offset) or [],
     )
     with app.test_client() as client:
         _login(client)
         assert client.get("/api/history?limit=20&offset=40").status_code == 200
-    assert captured == {"limit": 20, "offset": 40}
+    assert captured == {"limit": 60, "offset": 0}
 
 
 def _interrupted_mission(tmp_path) -> int:

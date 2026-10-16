@@ -70,11 +70,8 @@ def create_app():
         # Send only the cross-origin origin, rather than the full dashboard URL.
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         if request.path.startswith("/static/vendor/") and response.status_code == 200:
-            # Vendored Leaflet/Font Awesome are pinned by filename and never
-            # change in place. This must override rather than setdefault:
-            # Flask already stamps its own no-cache on static responses, which
-            # would otherwise cancel out hosting these assets locally.
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            # Stable filenames must revalidate after an asset upgrade.
+            response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
         elif not request.path.startswith("/static/"):
             response.headers.setdefault("Cache-Control", "no-store")
         return response
@@ -84,6 +81,8 @@ def create_app():
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        from mock_gps.core.navigation import worker_health
+        health = worker_health()
+        return health, 200 if health["status"] == "ok" else 503
 
     return app

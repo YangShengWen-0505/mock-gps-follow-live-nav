@@ -80,13 +80,51 @@ export function showToast(message, type = "info") {
     }, 4200);
 }
 
+const modalOpeners = new Map();
+const focusable = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex="0"]';
+
 export function openModal(id) {
-    $(id).classList.add("show");
+    const modal = $(id);
+    if (!modal.classList.contains("show")) modalOpeners.set(id, document.activeElement);
+    document.querySelectorAll(".modal.show").forEach((other) => {
+        if (other.id !== id) closeModal(other.id);
+    });
+    modal.classList.add("show");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    const heading = modal.querySelector("h2");
+    if (heading) {
+        heading.id ||= `${id}-heading`;
+        modal.setAttribute("aria-labelledby", heading.id);
+    }
+    modal.tabIndex = -1;
+    (modal.querySelector(focusable) || modal).focus();
 }
 
 export function closeModal(id) {
     $(id).classList.remove("show");
+    modalOpeners.get(id)?.focus();
+    modalOpeners.delete(id);
+    document.dispatchEvent(new CustomEvent("modalclosed", { detail: id }));
 }
+
+document.addEventListener("keydown", (event) => {
+    const modal = document.querySelector(".modal.show");
+    if (!modal) return;
+    if (event.key === "Escape") {
+        event.preventDefault();
+        closeModal(modal.id);
+    } else if (event.key === "Tab") {
+        const nodes = [...modal.querySelectorAll(focusable)].filter((node) => node.getClientRects().length);
+        const first = nodes[0] || modal;
+        const last = nodes.at(-1) || modal;
+        if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
+            event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
+            event.preventDefault(); first.focus();
+        }
+    }
+});
 
 export function renderError(container, message) {
     container.innerHTML = `<div class="error-state">${escapeHtml(message)}</div>`;

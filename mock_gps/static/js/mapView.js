@@ -21,6 +21,7 @@ let activePolylineColor = null;
 let lastDrawnRecord = null;
 let mapTotalDistance = 0;
 let pointStride = 1;
+let renderedPoints = [];
 const POINT_STRIDE_TARGET = 5000;
 
 function getIconHtml(faIcon) {
@@ -73,9 +74,7 @@ export function initMap() {
     if (typeof L === "undefined") {
         throw new Error("Leaflet failed to load from /static/vendor/. Reload the page; if it persists, reinstall the app assets.");
     }
-    if (typeof L.maplibreGL !== "function") {
-        throw new Error("OpenFreeMap renderer failed to load. Check the MapLibre CDN connection and reload the page.");
-    }
+
 
     map = L.map("map", { zoomControl: false, preferCanvas: true }).setView([25.1673, 121.4466], 15);
     L.control.zoom({ position: "bottomright" }).addTo(map);
@@ -99,14 +98,29 @@ export function initMap() {
             maxZoom: 20,
             attribution: cartoAttribution,
         }),
-        openFreeMap: L.maplibreGL({
-            style: "https://tiles.openfreemap.org/styles/liberty",
-            attributionControl: { customAttribution: openFreeMapAttribution },
-        }),
+
     };
 
-    currentBaseLayer = baseMaps.openFreeMap;
-    currentBaseLayer.addTo(map);
+    try {
+        if (typeof L.maplibreGL === "function") {
+            baseMaps.openFreeMap = L.maplibreGL({
+                style: "https://tiles.openfreemap.org/styles/liberty",
+                attributionControl: { customAttribution: openFreeMapAttribution },
+            });
+            baseMaps.openFreeMap.addTo(map);
+        }
+    } catch {
+        if (baseMaps.openFreeMap) map.removeLayer(baseMaps.openFreeMap);
+        delete baseMaps.openFreeMap;
+    }
+    currentBaseLayer = baseMaps.openFreeMap || baseMaps.osmDark;
+    if (!baseMaps.openFreeMap) {
+        currentBaseLayer.addTo(map);
+        $("mapLayerSelect").value = "osmDark";
+        $("map").classList.add("dark-filter");
+        const option = $("mapLayerSelect").querySelector('[value="openFreeMap"]');
+        if (option) option.disabled = true;
+    }
     polylinesLayer = L.featureGroup().addTo(map);
     pointsLayer = L.featureGroup().addTo(map);
     plannedRouteLayer = L.polyline([], { color: colors.special, weight: 5, opacity: 0.8, dashArray: "8, 8" }).addTo(map);
@@ -114,7 +128,7 @@ export function initMap() {
 
     $("mapLayerSelect").addEventListener("change", (event) => {
         map.removeLayer(currentBaseLayer);
-        currentBaseLayer = baseMaps[event.target.value];
+        currentBaseLayer = baseMaps[event.target.value] || baseMaps.osmDark;
         currentBaseLayer.addTo(map);
         $("map").classList.toggle("dark-filter", event.target.value === "osmDark");
     });
@@ -153,8 +167,9 @@ export function resetMapStats() {
     activePolylineColor = null;
     lastDrawnRecord = null;
     mapTotalDistance = 0;
-    polylinesLayer.clearLayers();
-    pointsLayer.clearLayers();
+    polylinesLayer?.clearLayers();
+    pointsLayer?.clearLayers();
+    renderedPoints = [];
     $("totalPoints").textContent = "0";
     $("totalDistance").innerHTML = '0.00<span class="stat-unit">km</span>';
 }
@@ -168,6 +183,7 @@ export function renderRecords(records) {
 }
 
 export function renderRecordsIncremental(records, totalCount) {
+    if (!polylinesLayer) return;
     const typeFilter = $("typeFilter").value;
     const showPoints = $("showPoints").checked;
 
@@ -192,9 +208,11 @@ export function renderRecordsIncremental(records, totalCount) {
 
         if (showPoints && Number(record.sequence || 0) % pointStride === 0) {
             const tooltip = `<div><strong style="color:${recordColor}">${escapeHtml(record.action)}</strong><br><span>${escapeHtml(formatDateTime(record.time))}</span></div>`;
-            L.circleMarker(latlng, { radius: 4, color: "#fff", weight: 1, fillColor: recordColor, fillOpacity: 0.9 })
+            const dot = L.circleMarker(latlng, { radius: 4, color: "#fff", weight: 1, fillColor: recordColor, fillOpacity: 0.9 })
                 .bindTooltip(tooltip, { className: "custom-tooltip", direction: "top", opacity: 1 })
                 .addTo(pointsLayer);
+            renderedPoints.push(dot);
+            if (renderedPoints.length > POINT_STRIDE_TARGET) pointsLayer.removeLayer(renderedPoints.shift());
         }
         lastDrawnRecord = record;
     });
@@ -205,13 +223,14 @@ export function renderRecordsIncremental(records, totalCount) {
 }
 
 export function updateMarker(record, autoFollow) {
-    if (!record) return;
+    if (!record || !twinMarker) return;
     const latlng = [record.lat, record.lng];
     twinMarker.setLatLng(latlng).setIcon((icons[categorizeAction(record.action)] || icons.walk)());
     if (autoFollow) map.panTo(latlng, { animate: true, duration: 0.7, easeLinearity: 0.1 });
 }
 
 export function updatePlannedRoute(points) {
+    if (!plannedRouteLayer) return;
     if (!Array.isArray(points) || points.length === 0) {
         plannedRouteLayer.setLatLngs([]);
         if (plannedRouteDecorator) {

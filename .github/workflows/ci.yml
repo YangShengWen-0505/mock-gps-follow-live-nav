@@ -9,14 +9,20 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python }}
           cache: pip
       - run: pip install -r requirements-dev.txt
+      - run: pip check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --experimental-vm-modules --test tests/frontend.test.mjs
       - run: ruff check .
       - run: python -m compileall -q mock_gps start_local.py
         env:

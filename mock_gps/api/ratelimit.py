@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 from collections import deque
@@ -46,6 +47,19 @@ class RateLimiter:
     def clear(self, source: str) -> None:
         with self._lock:
             self._attempts.pop(source, None)
+
+    def retry_after(self, source: str) -> int:
+        """Check the window before attempting another credential comparison."""
+        now = time.monotonic()
+        with self._lock:
+            attempts = self._attempts.get(source)
+            if not attempts:
+                return 0
+            while attempts and now - attempts[0] >= self._window_seconds:
+                attempts.popleft()
+            if len(attempts) < self._max_attempts:
+                return 0
+            return max(1, math.ceil(self._window_seconds - (now - attempts[0])))
 
     def reset(self) -> None:
         with self._lock:

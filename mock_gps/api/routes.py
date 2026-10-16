@@ -12,7 +12,7 @@ from mock_gps.api.middleware import (
 from mock_gps.api.ratelimit import RateLimiter
 
 api_bp = Blueprint("api", __name__)
-ALLOWED_MODES = {"walking", "transit", "motorcycle"}
+ALLOWED_MODES = {"walking", "transit"}
 ALLOWED_TRANSIT_TYPES = {"", "AUTO", "MRT", "BUS"}
 ALLOWED_LOGS = {"all", "route", "error", "security"}
 login_limiter = RateLimiter()
@@ -31,7 +31,12 @@ def _parse_coord(value: str, field_name: str) -> tuple[float, float]:
 def _validate_stop(stop: dict, index: int) -> dict:
     if not isinstance(stop, dict):
         raise ValueError(f"stops[{index}] must be an object")
-    name = str(stop.get("name", "")).strip()
+    for field in ("name", "mode", "transit_type", "wait_time", "coord"):
+        if not isinstance(stop.get(field, ""), str):
+            raise ValueError(f"stops[{index}].{field} must be a string")
+    if not isinstance(stop.get("skip_if_late", False), bool):
+        raise ValueError(f"stops[{index}].skip_if_late must be a boolean")
+    name = stop.get("name", "").strip()
     mode = str(stop.get("mode", "")).strip()
     transit_type = str(stop.get("transit_type", "")).strip().upper()
     wait_time = str(stop.get("wait_time", "")).strip()
@@ -64,7 +69,9 @@ def _validate_stop(stop: dict, index: int) -> dict:
 def _validate_mission_payload(data: dict) -> tuple[str, list[dict]]:
     if not isinstance(data, dict):
         raise ValueError("JSON body is required")
-    init_loc = str(data.get("init_loc", "")).strip()
+    if not isinstance(data.get("init_loc"), str):
+        raise ValueError("init_loc must be a string")
+    init_loc = data["init_loc"].strip()
     stops = data.get("stops", [])
     _parse_coord(init_loc, "init_loc")
     if not isinstance(stops, list) or not stops:
@@ -137,7 +144,9 @@ def _route_payload(mission: dict) -> dict:
 
 def _history_mission(date_value: str, session_value: str, *, include_plan: bool) -> dict | None:
     log_session = history.history_log_session_id(date_value, session_value)
-    return db.mission_by_log_session(log_session, include_plan=include_plan)
+    return db.mission_by_log_session(log_session, include_plan=include_plan) or history.snapshot_mission(
+        date_value, session_value,
+    )
 
 
 @api_bp.route("/")
@@ -149,6 +158,12 @@ def index():
 def login():
     address = request.remote_addr or "unknown"
     if request.method == "POST":
+        retry = login_limiter.retry_after(address)
+        if retry:
+            logger.log_security(f"Dashboard login failed (throttled) from {address}", "warning")
+            return render_template("login.html", error="Too many attempts. Try again later."), 429, {
+                "Retry-After": str(retry),
+            }
         key = request.form.get("api_key", "")
         if key and secret_equals(key, config.API_SECRET_KEY):
             login_limiter.clear(address)
@@ -174,6 +189,8 @@ def logout():
 @require_api_key(allow_session=False)
 def stop_task_route():
     mission_id = db.request_cancel()
+    if mission_id:
+        history.persist_mission(mission_id)
     return jsonify({"status": "Cancellation requested", "mission_id": mission_id})
 
 
@@ -184,10 +201,14 @@ def start_task():
         init_loc, stops = _validate_mission_payload(request.get_json(silent=True))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    previous = db.latest_mission(include_plan=False, include_payload=False)
     mission_id = db.create_mission(
         {"init_loc": init_loc, "stops": stops},
         p2p_target=config.PHONE_TAILSCALE_IP,
     )
+    history.persist_mission(mission_id)
+    if previous and previous["status"] in {"planning", "queued"} and previous["worker_id"] is None:
+        history.persist_mission(previous["id"])
     response = jsonify({
         "status": "Mission planning",
         "mission_id": mission_id,
@@ -261,7 +282,21 @@ def get_mission_data():
 def get_history_sessions():
     limit = min(max(request.args.get("limit", type=int, default=100), 1), 500)
     offset = max(request.args.get("offset", type=int, default=0), 0)
-    return jsonify(history.list_history_sessions(limit, offset))
+    sessions = {entry["id"]: entry for entry in history.list_history_sessions(limit + offset, 0, sort_by="id")}
+    for mission in db.history_missions(limit + offset):
+        if not mission.get("log_session"):
+            continue
+        date_value, session_value = mission["log_session"].split("/")
+        key = mission["log_session"]
+        entry = sessions.setdefault(key, {
+            "id": key, "date": date_value, "session": session_value,
+            "created_at": mission["created_at"], "updated_at": mission["finished_at"] or mission["created_at"],
+            "start": mission["payload"].get("init_loc", ""),
+            "stops": len(mission["payload"].get("stops", [])), "csv_size": 0, "archived": False,
+        })
+        entry["status"] = mission["status"]
+    ordered = sorted(sessions.values(), key=lambda item: item["id"], reverse=True)
+    return jsonify(ordered[offset:offset + limit])
 
 
 @api_bp.route("/api/history/<date_value>/<session_value>/status")
@@ -313,6 +348,9 @@ def history_movements(date_value: str, session_value: str):
             request.args.get("limit", type=int, default=250),
         ))
     except FileNotFoundError as exc:
+        if _history_mission(date_value, session_value, include_plan=False):
+            return jsonify({"records": [], "next_offset": 0,
+                            "stream_id": f"{date_value}/{session_value}", "has_more": False})
         return jsonify({"error": str(exc)}), 404
 
 
@@ -338,7 +376,7 @@ def get_log_data(log_name: str):
         return "Task not started", 404
     try:
         path = history.log_path_for_session(mission["log_session"], log_name)
-        return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/plain; charset=utf-8"}
+        return history.read_log_tail(path), 200, {"Content-Type": "text/plain; charset=utf-8"}
     except FileNotFoundError:
         return "Log file not found", 404
 
@@ -368,7 +406,8 @@ def show_history(date_value: str, session_value: str):
     try:
         history.resolve_history_movement(date_value, session_value)
     except FileNotFoundError:
-        return "History session not found", 404
+        if not _history_mission(date_value, session_value, include_plan=False):
+            return "History session not found", 404
     return render_template(
         "map.html",
         page_context={

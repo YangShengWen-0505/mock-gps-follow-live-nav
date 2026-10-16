@@ -161,13 +161,17 @@
             </div>
         </aside>
 
-        <section id="playback-panel" class="surface playback-dock">
-            <button id="playPauseBtn" class="play-btn"><i class="fa-solid fa-play"></i></button>
+        <section id="playback-panel" class="surface playback-dock{{ ' history-playback' if page_context.mode == 'history' else '' }}">
+            <button aria-label="Play or pause playback" id="playPauseBtn" class="play-btn"><i class="fa-solid fa-play"></i></button>
             <div class="slider-container">
                 <span id="playback-time" class="time-display">--:--:--</span>
-                <input type="range" id="timeSlider" min="0" max="0" value="0" step="1">
+                <input aria-label="Playback position" type="range" id="timeSlider" min="0" max="0" value="0" step="1">
                 <span id="playback-end-time" class="time-display">--:--:--</span>
             </div>
+            {% if page_context.mode == 'history' %}
+            <button id="historyEarlier" class="action-btn" disabled>Earlier records</button>
+            <button id="historyLater" class="action-btn" disabled>Later records</button>
+            {% endif %}
             <button id="liveBtn" class="live-btn active">LIVE</button>
         </section>
     </div>
@@ -176,7 +180,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h2>Mission schedule</h2>
-                <button class="close-btn" data-close-modal="mission-modal"><i class="fa-solid fa-xmark"></i></button>
+                <button aria-label="Close dialog" class="close-btn" data-close-modal="mission-modal"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" id="mission-body"></div>
         </div>
@@ -186,7 +190,7 @@
         <div class="modal-content wide">
             <div class="modal-header">
                 <h2>Mission history</h2>
-                <button class="close-btn" data-close-modal="history-modal"><i class="fa-solid fa-xmark"></i></button>
+                <button aria-label="Close dialog" class="close-btn" data-close-modal="history-modal"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" id="history-body"></div>
         </div>
@@ -196,7 +200,7 @@
         <div class="modal-content wide">
             <div class="modal-header">
                 <h2>Navigation history</h2>
-                <button class="close-btn" data-close-modal="navigation-modal"><i class="fa-solid fa-xmark"></i></button>
+                <button aria-label="Close dialog" class="close-btn" data-close-modal="navigation-modal"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" id="navigation-body"></div>
         </div>
@@ -206,7 +210,7 @@
         <div class="modal-content wide">
             <div class="modal-header">
                 <h2 id="data-modal-title">Data</h2>
-                <button class="close-btn" data-close-modal="data-modal"><i class="fa-solid fa-xmark"></i></button>
+                <button aria-label="Close dialog" class="close-btn" data-close-modal="data-modal"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" id="data-body"></div>
         </div>

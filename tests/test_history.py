@@ -1,5 +1,7 @@
 import csv
 import json
+import os
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -118,7 +120,10 @@ def test_archiving_does_not_restamp_an_old_session_as_the_newest(tmp_path, monke
     log_root = _history_roots(tmp_path, monkeypatch)
     old_date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
-    _session_with_movement(log_root, old_date, "12-00-00")
+    old_session = _session_with_movement(log_root, old_date, "12-00-00")
+    # Do not depend on two file writes landing in different filesystem ticks.
+    old_stamp = datetime.strptime(old_date, "%Y-%m-%d").timestamp()
+    os.utime(old_session / "movement.csv", (old_stamp, old_stamp))
     _session_with_movement(log_root, today, "08-00-00")
 
     assert history.archive_expired_sessions(30) == [f"{old_date}__12-00-00"]
@@ -203,3 +208,36 @@ def test_non_date_directories_are_not_listed_as_sessions(tmp_path, monkeypatch):
     stray.mkdir(parents=True)
     (stray / "movement.csv").write_text("Sequence\n", encoding="utf-8")
     assert [item["id"] for item in history.list_history_sessions()] == ["2026-08-04/10-00-00"]
+
+
+def test_archive_rebuilds_valid_but_stale_zip_before_deleting_source(tmp_path, monkeypatch):
+    root = _history_roots(tmp_path, monkeypatch)
+    date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+    session = _session_with_movement(root, date, "12-00-00")
+    history.ARCHIVE_ROOT.mkdir()
+    archive = history.ARCHIVE_ROOT / f"{date}__12-00-00.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("movement.csv", "stale")
+    (session / "route.log").write_text("new data after previous archive", encoding="utf-8")
+    assert history.archive_expired_sessions()
+    assert history.read_history_log(date, "12-00-00", "route") == "new data after previous archive"
+
+
+def test_archive_excludes_active_and_open_sessions(tmp_path, monkeypatch):
+    root = _history_roots(tmp_path, monkeypatch)
+    date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+    active = _session_with_movement(root, date, "12-00-00")
+    (active / "mission.json").write_text(json.dumps({"mission": {"status": "running"}}), encoding="utf-8")
+    opened = _session_with_movement(root, date, "13-00-00")
+    monkeypatch.setattr(logger, "current_session_dir", opened)
+    assert history.archive_expired_sessions() == []
+    assert active.exists() and opened.exists()
+
+
+def test_archive_keeps_source_if_verification_detects_change(tmp_path, monkeypatch):
+    root = _history_roots(tmp_path, monkeypatch)
+    date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+    session = _session_with_movement(root, date, "12-00-00")
+    monkeypatch.setattr(history, "_archive_matches", lambda *_a: False)
+    assert history.archive_expired_sessions() == []
+    assert (session / "movement.csv").exists()

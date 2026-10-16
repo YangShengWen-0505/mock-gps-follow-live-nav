@@ -43,6 +43,13 @@ def require_api_key(allow_session: bool = True):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             address = request.remote_addr or "unknown"
+            if allow_session and has_valid_session():
+                api_limiter.clear(address)
+                return f(*args, **kwargs)
+            retry = api_limiter.retry_after(address)
+            if retry and request.headers.get(API_KEY_HEADER):
+                logger.log_security(f"API credential attempt throttled from {address}", "warning")
+                return jsonify({"error": "Too many attempts"}), 429, {"Retry-After": str(retry)}
             if has_valid_api_key():
                 api_limiter.clear(address)
                 return f(*args, **kwargs)

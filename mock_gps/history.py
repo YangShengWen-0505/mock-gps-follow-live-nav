@@ -15,10 +15,13 @@ import os
 import shutil
 import threading
 import zipfile
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mock_gps import config, logger
+from mock_gps import config, db, logger
+
+SESSION_LOCK = threading.RLock()
 
 ARCHIVE_ROOT = logger.LOG_ROOT / "archives"
 ARCHIVE_CACHE_ROOT = logger.LOG_ROOT / ".archive-cache"
@@ -59,7 +62,7 @@ def _read_mission_metadata(session_dir: Path) -> dict:
         return {}
 
 
-def _list_unarchived_sessions(limit: int = 100) -> list[dict]:
+def _list_unarchived_sessions(limit: int | None = 100) -> list[dict]:
     sessions: list[dict] = []
     if not logger.LOG_ROOT.exists():
         return sessions
@@ -91,7 +94,7 @@ def _list_unarchived_sessions(limit: int = 100) -> list[dict]:
                 "updated_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
                 "archived": False,
             })
-            if len(sessions) >= limit:
+            if limit is not None and len(sessions) >= limit:
                 return sessions
     return sessions
 
@@ -154,11 +157,11 @@ def _archive_metadata() -> list[dict]:
     return result
 
 
-def list_history_sessions(limit: int = 100, offset: int = 0) -> list[dict]:
+def list_history_sessions(limit: int = 100, offset: int = 0, *, sort_by: str = "updated_at") -> list[dict]:
     # Both sources must be enumerated before slicing: taking unarchived first
     # meant a backlog of 100 live sessions hid every archived one permanently.
-    sessions = _list_unarchived_sessions(limit + offset) + _archive_metadata()
-    sessions.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    sessions = _list_unarchived_sessions(limit + offset if sort_by == "id" else None) + _archive_metadata()
+    sessions.sort(key=lambda item: item.get(sort_by) or "", reverse=True)
     return sessions[offset : offset + limit]
 
 
@@ -188,7 +191,7 @@ def resolve_history_file(date_value: str, session_value: str, kind: str) -> Path
         target = ARCHIVE_CACHE_ROOT / date_value / session_value
         path = target / filename
         _touch_cache(target)
-        if not path.exists():
+        if not path.exists() or path.stat().st_mtime_ns < archive.stat().st_mtime_ns:
             # Waitress runs 8 threads; two concurrent requests would otherwise
             # interleave writes into the same file. Same-directory replace is
             # atomic, so a reader either sees no file or a complete one.
@@ -213,11 +216,11 @@ def resolve_history_movement(date_value: str, session_value: str) -> Path:
 
 def history_log_session_id(date_value: str, session_value: str) -> str:
     _validate_history_parts(date_value, session_value)
-    return str((logger.LOG_ROOT / date_value / session_value).resolve())
+    return f"{date_value}/{session_value}"
 
 
 def read_history_log(date_value: str, session_value: str, log_name: str) -> str:
-    return resolve_history_file(date_value, session_value, log_name).read_text(encoding="utf-8")
+    return read_log_tail(resolve_history_file(date_value, session_value, log_name))
 
 
 def read_movement_records(path: Path, offset: int = 0, limit: int = 250) -> dict:
@@ -234,7 +237,11 @@ def read_movement_records(path: Path, offset: int = 0, limit: int = 250) -> dict
         if offset == 0:
             handle.readline()
         while len(records) < limit:
+            row_offset = handle.tell()
             raw = handle.readline()
+            if raw and not raw.endswith(b"\n"):
+                handle.seek(row_offset)
+                break
             if not raw:
                 break
             try:
@@ -255,13 +262,13 @@ def read_movement_records(path: Path, offset: int = 0, limit: int = 250) -> dict
         "records": records,
         "next_offset": next_offset,
         "stream_id": f"{path.parent.parent.name}/{path.parent.name}",
-        "has_more": next_offset < size,
+        "has_more": next_offset < size and bool(records),
     }
 
 
 def _session_parts(session_dir: str | Path) -> tuple[str, str]:
-    path = Path(session_dir)
-    return path.parent.name, path.name
+    parts = db.session_key(str(session_dir)).split("/")
+    return parts[0], parts[1]
 
 
 def movement_path_for_session(session_dir: str | Path) -> Path:
@@ -333,12 +340,78 @@ def _write_archive_metadata(archive_path: Path, session_dir: Path) -> None:
         logger.log_sys(f"Archive metadata write failed for {archive_path.name}: {exc}", "warning")
 
 
+def read_log_tail(path: Path, max_bytes: int = 256 * 1024) -> str:
+    with path.open("rb") as handle:
+        size = path.stat().st_size
+        handle.seek(max(0, size - max_bytes))
+        if size > max_bytes:
+            handle.readline()
+        data = handle.read(max_bytes).decode("utf-8", errors="replace")
+    notice = "[Showing the latest 256 KiB; older entries remain in rotated log files.]\n"
+    return (notice if size > max_bytes else "") + data
+
+
+def persist_mission(mission_id: int) -> None:
+    try:
+        _persist_mission(mission_id)
+    except OSError as exc:
+        # SQLite is authoritative; a full disk must not make an accepted API
+        # request look rejected or turn a completed navigation into a failure.
+        logger.log_sys(f"Mission {mission_id} snapshot deferred: {exc}", "warning")
+
+
+def _persist_mission(mission_id: int) -> None:
+    """Write a portable snapshot, rereading under the lock to avoid stale writers."""
+    with SESSION_LOCK:
+        mission = db.get_mission(mission_id)
+        if not mission or not mission.get("log_session"):
+            return
+        date_value, session_value = _session_parts(mission["log_session"])
+        _validate_history_parts(date_value, session_value)
+        directory = logger.LOG_ROOT / date_value / session_value
+        directory.mkdir(parents=True, exist_ok=True)
+        movement = directory / "movement.csv"
+        if not movement.exists():
+            with movement.open("x", encoding="utf-8", newline="") as handle:
+                csv.writer(handle).writerow(logger.MOVEMENT_FIELDS)
+        target = directory / "mission.json"
+        temporary = directory / "mission.json.tmp"
+        temporary.write_text(json.dumps({"created_at": mission["created_at"], "mission": mission},
+                                        ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(target)
+
+
+def snapshot_mission(date_value: str, session_value: str) -> dict | None:
+    try:
+        value = json.loads(resolve_history_file(date_value, session_value, "mission").read_text(encoding="utf-8"))
+        mission = value.get("mission", {})
+        return mission if "status" in mission and "id" in mission else None
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _archive_matches(archive: Path, directory: Path) -> bool:
+    with zipfile.ZipFile(archive) as bundle:
+        files = [path for path in directory.rglob("*") if path.is_file()]
+        if set(bundle.namelist()) != {path.relative_to(directory).as_posix() for path in files}:
+            return False
+        for path in files:
+            checksum = 0
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    checksum = zlib.crc32(chunk, checksum)
+            info = bundle.getinfo(path.relative_to(directory).as_posix())
+            if info.file_size != path.stat().st_size or info.CRC != checksum:
+                return False
+    return True
+
+
 def archive_expired_sessions(days: int = 30) -> list[str]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
     archived: list[str] = []
     for date_dir in list(logger.LOG_ROOT.iterdir()) if logger.LOG_ROOT.exists() else []:
-        if not date_dir.is_dir() or date_dir.name.startswith(".") or date_dir == ARCHIVE_ROOT:
+        if not date_dir.is_dir() or date_dir.is_symlink():
             continue
         try:
             date_value = datetime.strptime(date_dir.name, "%Y-%m-%d").replace(tzinfo=config.TIMEZONE)
@@ -347,28 +420,39 @@ def archive_expired_sessions(days: int = 30) -> list[str]:
         if date_value >= cutoff:
             continue
         for session_dir in list(date_dir.iterdir()):
-            if not session_dir.is_dir():
-                continue
-            archive_path = ARCHIVE_ROOT / f"{date_dir.name}__{session_dir.name}.zip"
-            try:
-                if not _verified_archive(archive_path):
-                    temp_path = archive_path.with_suffix(".zip.tmp")
-                    temp_path.unlink(missing_ok=True)
+            with SESSION_LOCK:
+                if not session_dir.is_dir() or session_dir.is_symlink():
+                    continue
+                if logger.current_session_dir and session_dir.resolve() == logger.current_session_dir.resolve():
+                    continue
+                mission = _read_mission_metadata(session_dir).get("mission", {})
+                if mission.get("status") in {"planning", "queued", "running", "degraded"} or mission.get(
+                    "is_holding_final_position"
+                ):
+                    continue
+                archive_path = ARCHIVE_ROOT / f"{date_dir.name}__{session_dir.name}.zip"
+                temp_path = archive_path.with_suffix(".zip.tmp")
+                try:
+                    # Always rebuild: an old valid archive can predate a failed
+                    # deletion and must not authorize deleting newer records.
                     with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
                         for file in session_dir.rglob("*"):
+                            if file.is_symlink():
+                                raise RuntimeError("Refusing to archive a symlink")
                             if file.is_file():
                                 bundle.write(file, file.relative_to(session_dir))
-                    if not _verified_archive(temp_path):
-                        temp_path.unlink(missing_ok=True)
+                    if not _verified_archive(temp_path) or not _archive_matches(temp_path, session_dir):
                         raise RuntimeError(f"Archive verification failed: {session_dir}")
                     temp_path.replace(archive_path)
-                if not _verified_archive(archive_path):
-                    raise RuntimeError(f"Archive verification failed: {archive_path}")
-                _write_archive_metadata(archive_path, session_dir)
-                shutil.rmtree(session_dir)
-                archived.append(archive_path.stem)
-            except Exception as exc:
-                logger.log_sys(f"History archive deferred for {session_dir}: {exc}", "warning")
+                    _write_archive_metadata(archive_path, session_dir)
+                    if logger.LOG_ROOT.resolve() not in session_dir.resolve().parents:
+                        raise RuntimeError("Session escaped the log root")
+                    shutil.rmtree(session_dir)
+                    archived.append(archive_path.stem)
+                except Exception as exc:
+                    logger.log_sys(f"History archive deferred for {session_dir}: {exc}", "warning")
+                finally:
+                    temp_path.unlink(missing_ok=True)
         try:
             if not any(date_dir.iterdir()):
                 date_dir.rmdir()
