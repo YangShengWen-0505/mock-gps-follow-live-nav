@@ -69,7 +69,7 @@ def _phone_loop() -> None:
                     _record_phone_health(mission_id, "standby")
                     continue
                 try:
-                    response = session.get(PHONE_URL, params={"lat": lat, "lng": lng}, timeout=0.8)
+                    response = session.get(PHONE_URL, params={"lat": lat, "lng": lng}, timeout=1.0)
                     response.raise_for_status()
                     status, error = "ok", None
                 except requests.RequestException as exc:
